@@ -31,9 +31,9 @@ The whole thing runs on the free tier of [Nous Research's inference API](https:/
 
 Any OpenAI-compatible endpoint works — set `api_base` and `key_file` in the config and name whichever models you like.
 
-Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. So the assistant checks the catalogue monthly and messages you if a model it depends on has gone, naming what is still available. It mentions genuinely new free models too, once each rather than every month until you act.
+Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. So the daily health check also confirms that the models this install depends on are still in the catalogue, and messages you if one has gone, naming what is still free.
 
-It reports and never switches. Which model answers is a judgement call about quality, so it stays yours — the same reason no model is allowed to trigger an action.
+It reports and never switches. Picking a replacement is a judgement call — a model can be excellent and still be wrong for the job, since one tuned for agentic coding is not necessarily the one you want answering questions about grammar — so it stays yours. The same reason no model is allowed to trigger an action.
 
 Free models are the interesting constraint, because the natural worry about pointing a language model at a real server is how much you are willing to trust it. **This design means you don't have to.** The safety of the system does not rest on the model being well-behaved, well-aligned, or even competent — which is exactly what makes free-tier models a practical choice rather than a compromise.
 
@@ -72,7 +72,7 @@ Signal delivers messages sealed-sender, meaning the sender is hidden from the te
 - **Understands replies.** Reply to any earlier message and that conversation becomes the context, overriding the automatic follow-up detection. It confirms by replying as a Signal quote, so a wrong match is visible immediately instead of producing a baffling answer.
 - **Tracks follow-ups.** A separate step decides which earlier exchanges matter and rewrites your message as a standalone question before anything is looked up, so "what about the plural?" gets researched properly.
 - **Keeps a queue.** Anything that's a task rather than a question is saved and resurfaced in a morning summary until you clear it.
-- **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, tells you how long it was down once it recovers, and warns you monthly if a model it depends on is leaving the free tier.
+- **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, tells you how long it was down once it recovers, and warns you if a model it depends on has left the catalogue.
 - **Never goes quiet.** Every path that drops a message — too old, rate limited, kill switch, unrecognised quote — says so. An unexplained non-reply is indistinguishable from a crash.
 
 ## What it won't do
@@ -104,7 +104,6 @@ Then add to cron:
 @reboot sleep 30 && /path/to/signal-supervise
 */10 * * * * /path/to/signal-watchdog --restart
 23 8 * * *  /path/to/signal-watchdog --daily
-0 9 1 * *   /path/to/signal-watchdog --models
 ```
 
 Nothing here needs systemd, deliberately: user timers need lingering enabled, which needs root, and this is designed to run as an ordinary unprivileged account.

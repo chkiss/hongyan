@@ -1160,66 +1160,36 @@ def configured_models():
 
 
 def check_models():
-    """Report configured models that have vanished, and free models newly on offer.
+    """Warn when a model this install depends on has left the catalogue.
 
     Free tiers rotate: a model that is free today can be withdrawn or moved
     behind credits, and the first symptom is every answer failing with a 404
-    that reads like a broken key. Checking on a schedule turns that into a
-    warning with a named replacement instead of an outage.
+    that reads like a broken key. This runs with the daily health check, so an
+    outage is caught within a day rather than at the next monthly review.
 
-    Reports, never switches. Which model answers is a config decision with a
-    real quality trade-off, so it stays a human one — the same reason no model
-    may reach a T2 action.
+    Deliberately narrow. Discovering and evaluating NEW models is a separate
+    job with a separate cadence — it needs capability analysis (modalities,
+    context length, whether the thing is actually suited to answering
+    questions) rather than a name match, and it ends in a human decision. This
+    is only the guard that says a dependency has gone.
     """
     catalog = model_catalog()
     if catalog is None:
         return "Could not read the model catalog — the API may be down or the key rejected."
 
-    lines = []
     missing = {role: mid for role, mid in configured_models().items()
                if mid and mid not in catalog}
-    if missing:
-        lines.append("MODELS MISSING from the catalog — these will start failing:")
-        for role, mid in sorted(missing.items()):
-            lines.append("  %s: %s" % (role, mid))
-        free = [m for m in catalog if m.endswith(":free")]
-        if free:
-            lines.append("")
-            lines.append("Still free and available: %s" % ", ".join(sorted(free)))
-        audit_fail("models_missing", ", ".join(sorted(missing.values())))
-
-    known = set(CFG.get("known_free_models") or []) | {
-        m for m in configured_models().values() if m}
-    new_free = sorted(m for m in catalog if m.endswith(":free") and m not in known)
-    if new_free:
-        if lines:
-            lines.append("")
-        lines.append("New free models on offer since last check:")
-        for mid in new_free:
-            lines.append("  %s" % mid)
-        lines.append("")
-        lines.append("Set model_answer / model_classify / model_vision in config to try one.")
-        audit("models_new", ", ".join(new_free))
-
-    if not lines:
+    if not missing:
         return ""
 
-    # Remember what has been seen, so a new model is announced once rather than
-    # every month until it is adopted.
-    try:
-        cfg_path = CONFIG_PATH
-        with open(cfg_path) as fh:
-            raw = json.load(fh)
-        raw["known_free_models"] = sorted(
-            set(raw.get("known_free_models") or []) |
-            {m for m in catalog if m.endswith(":free")})
-        tmp = cfg_path + ".tmp"
-        with open(tmp, "w") as fh:
-            json.dump(raw, fh, indent=2, ensure_ascii=False)
-        os.replace(tmp, cfg_path)
-    except (OSError, ValueError) as exc:
-        audit_fail("models_seen_write", str(exc)[:120])
-
+    lines = ["MODELS MISSING from the catalog — these will start failing:"]
+    for role, mid in sorted(missing.items()):
+        lines.append("  %s: %s" % (role, mid))
+    free = [m for m in catalog if m.endswith(":free")]
+    if free:
+        lines.append("")
+        lines.append("Still free and available: %s" % ", ".join(sorted(free)))
+    audit_fail("models_missing", ", ".join(sorted(missing.values())))
     return "\n".join(lines)
 
 

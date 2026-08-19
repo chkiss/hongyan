@@ -3,8 +3,7 @@
 #
 #   --restart  (every 10 min)  quietly bring the daemon/listener back if dead
 #   --daily    (once a day)    verify health; alert over Signal only on failure
-#   --models   (monthly)       warn if a configured model has left the free tier,
-#                              and mention free models newly on offer
+#   --models   (with --daily)  warn if a configured model has left the catalogue
 #
 # Costs nothing in either mode: no model is called, and a Signal send is free.
 # Claude is never invoked.
@@ -124,8 +123,20 @@ case "$MODE" in
         fi
     }
 
+    # One HTTP GET. A model that has left the catalogue breaks every answer
+    # with a 404 that reads like a bad key, so catch it within a day.
+    check_models() {
+        report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
+        if [ -n "$report" ]; then
+            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+                >> "$LOG" 2>&1
+            log "model check: DEPENDENCY MISSING, reported"
+        fi
+    }
+
     if [ "${#problems[@]}" -eq 0 ]; then
         log "daily ok"
+        check_models
         send_digest
         exit 0
     fi
@@ -148,14 +159,11 @@ case "$MODE" in
     log "daily: alert sent"
     ;;
 --models)
-    # Free tiers rotate. A withdrawn model shows up as every answer failing
-    # with a 404 that looks like a bad key, so check on a schedule and say so
-    # in advance. Reports only — choosing a model stays a human decision.
-    report="$("$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")" \
-        || report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
+    # Also runnable on its own, for checking by hand after changing a model.
+    report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
     if [ -n "$report" ]; then
         printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" >> "$LOG" 2>&1
-        log "model check: reported"
+        log "model check: DEPENDENCY MISSING, reported"
     else
         log "model check: ok"
     fi
