@@ -1,0 +1,74 @@
+{
+  "_comment": "Copy to ~/.config/signal-listener/config.json and edit. The ACI is the ONLY authentication — Signal validates it cryptographically. Phone numbers are display attributes and are never used to authorize.",
+
+  "bot_number": "+15550000000",
+  "owner_aci": "00000000-0000-0000-0000-000000000000",
+  "owner_number": "+15550000001",
+
+  "socket": "~/.config/signal-listener/socket",
+
+  "_freshness_note": "Messages older than this are answered with a notice instead of acted on, so a backlog cannot replay after downtime.",
+  "max_message_age_seconds": 900,
+
+  "_throttle_note": "Burst cooldown, not an hourly cap. A cap punishes normal conversation and fails silently; a cooldown only reacts to a genuine flood, always announces itself, and clears on its own.",
+  "burst_count": 5,
+  "burst_window_seconds": 60,
+  "cooldown_seconds": 300,
+  "cooldown_max_seconds": 1800,
+
+  "_model_note": "Any OpenAI-compatible endpoint. These are free-tier models; set key_file to a file containing the API key, mode 600.",
+  "api_base": "https://inference-api.nousresearch.com/v1",
+  "key_file": "~/.config/signal-listener/nous.key",
+  "model_classify": "upstage/solar-pro4:free",
+  "model_answer": "tencent/hy3:free",
+  "model_vision": "stepfun/step-3.7-flash:free",
+
+  "attachment_dir": "~/.local/share/signal-cli/attachments",
+  "max_image_bytes": 8000000,
+
+  "_timeout_note": "Generous on purpose. A typing indicator runs while the model works, so a slow answer looks like thinking rather than a hang. Short timeouts silently queued real questions. Never set a max_tokens: reasoning models emit reasoning before content, and any cap risks an empty reply.",
+  "model_timeout_seconds": 600,
+
+  "_steps_note": "Agent loop budget. The model chooses read-only steps (search / open a page / server probe / weather) until it can answer. Bounded because each step costs a round trip, and because a query composed after reading fetched text is a channel injected content could try to steer.",
+  "max_steps": 5,
+
+  "_site_note": "How the assistant describes the machine it lives on, and where its home-directory probes look.",
+  "site": {
+    "label": "my server",
+    "home_dir": "~"
+  },
+
+  "_services_note": "How to check each service. type: user | system | port. Getting this wrong reports healthy services as dead — a user unit checked as a system unit always looks inactive, and anything in a container is reachable only as a listening port. unit defaults to the service name.",
+  "services": {
+    "nginx": {"type": "system"},
+    "ssh": {"type": "system"},
+    "syncthing": {"type": "user", "unit": "syncthing"},
+    "some-container": {"type": "port", "port": 8080}
+  },
+
+  "_allowed_units_note": "Restartable units. Keep to user units unless the account has passwordless sudo — listing units it cannot touch only produces confusing failures.",
+  "allowed_units": ["syncthing"],
+
+  "_allowed_jobs_note": "Named commands the owner may re-run by typing 'rerun <name>'. Never reachable from free text or from a model.",
+  "allowed_jobs": {
+    "example": "/usr/bin/python3 /path/to/your/job.py"
+  },
+
+  "_custom_commands_note": "Extra read-only commands for this host, typed exactly or reached by a synonym. show_unit pairs the output with a service state check.",
+  "custom_commands": {
+    "backups": {
+      "desc": "last backup result",
+      "synonyms": ["backup", "backups", "backed up"],
+      "command": "tail -n 3 ~/backup.log 2>/dev/null || echo '(no backup log)'",
+      "timeout": 10
+    }
+  },
+
+  "_custom_probes_note": "Extra probes the agent may name while answering. Same safety boundary as the built-ins: the model emits a NAME and the code decides what it runs, so a name that is not defined here is dropped.",
+  "custom_probes": {
+    "backups": {
+      "desc": "last backup result",
+      "command": "tail -n 3 ~/backup.log"
+    }
+  }
+}

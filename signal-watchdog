@@ -1,0 +1,152 @@
+#!/bin/bash
+# Signal listener watchdog.
+#
+#   --restart  (every 10 min)  quietly bring the daemon/listener back if dead
+#   --daily    (once a day)    verify health; alert over Signal only on failure
+#
+# Costs nothing in either mode: no model is called, and a Signal send is free.
+# Claude is never invoked.
+#
+# Liveness uses PID files, not `pgrep -f` — see signal-supervise for why.
+set -uo pipefail
+
+DIR="$HOME/.config/signal-listener"
+HEARTBEAT="$DIR/heartbeat"
+LOG="$DIR/watchdog.log"
+DAEMON_PID="$DIR/daemon.pid"
+LISTENER_PID="$DIR/listener.pid"
+MODE="${1:---restart}"
+
+mkdir -p "$DIR"
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+alive() {
+    local pf="$1" want="$2" pid
+    [ -f "$pf" ] || return 1
+    pid="$(cat "$pf" 2>/dev/null)"
+    [ -n "$pid" ] || return 1
+    [ -d "/proc/$pid" ] || return 1
+    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$want"
+}
+
+daemon_up() { alive "$DAEMON_PID" "daemon"; }
+listener_up() { alive "$LISTENER_PID" "signal_listener"; }
+
+case "$MODE" in
+--restart)
+    FAILS="$DIR/restart_fails"
+    DOWN_SINCE="$DIR/down_since"
+
+    if daemon_up && listener_up; then
+        # Recovered. Say so if it was ever actually down: messages sent during
+        # the gap were dropped by the freshness cutoff, and an unexplained hole
+        # in the conversation is indistinguishable from being ignored.
+        if [ -f "$DOWN_SINCE" ]; then
+            since="$(cat "$DOWN_SINCE" 2>/dev/null || echo 0)"
+            mins=$(( ( $(date +%s) - since ) / 60 ))
+            log "recovered after ${mins}m down"
+            if [ "$mins" -ge 15 ]; then
+                /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+                    "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
+                    >> "$LOG" 2>&1
+            fi
+            rm -f "$DOWN_SINCE"
+        fi
+        rm -f "$FAILS"
+        exit 0
+    fi
+
+    [ -f "$DOWN_SINCE" ] || date +%s > "$DOWN_SINCE"
+    log "down (daemon=$(daemon_up && echo y || echo n) listener=$(listener_up && echo y || echo n)) - restarting"
+    "$HOME/.local/bin/signal-supervise"
+    sleep 5
+    if daemon_up && listener_up; then
+        log "restart ok"
+        rm -f "$FAILS"
+        # Handled here too: the next tick is 10 min away and the outage notice
+        # should not wait for it.
+        if [ -f "$DOWN_SINCE" ]; then
+            since="$(cat "$DOWN_SINCE" 2>/dev/null || echo 0)"
+            mins=$(( ( $(date +%s) - since ) / 60 ))
+            [ "$mins" -ge 15 ] && /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+                "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
+                >> "$LOG" 2>&1
+            rm -f "$DOWN_SINCE"
+        fi
+        exit 0
+    fi
+
+    # Still down. The silent mode was right for a single blip and wrong for a
+    # real outage: three consecutive failures once ran for 30 minutes on
+    # 2026-08-14 and never said a word, because only --daily could alert.
+    n=$(( $(cat "$FAILS" 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > "$FAILS"
+    log "restart FAILED ($n in a row)"
+
+    # Alert on the second failure (~20 min down), then hourly, so a long
+    # outage nags without flooding.
+    if [ "$n" -eq 2 ] || { [ "$n" -gt 2 ] && [ $(( n % 6 )) -eq 0 ]; }; then
+        /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+            "Signal listener is DOWN on hetz — $n restart attempts have failed. Commands are not being processed." \
+            >> "$LOG" 2>&1
+        log "alert sent (n=$n)"
+    fi
+    ;;
+
+--daily)
+    problems=()
+    daemon_up   || problems+=("signal-cli daemon not running")
+    listener_up || problems+=("listener not running")
+
+    # A live-but-wedged process is the failure a PID check misses, so also
+    # require a heartbeat that is not ancient. The listener touches it on any
+    # socket traffic; 48h is generous because quiet days are normal.
+    if [ -f "$HEARTBEAT" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT") ))
+        [ "$age" -gt 172800 ] && problems+=("heartbeat stale: $((age/3600))h")
+    fi
+
+    # Received images pile up in the attachment store forever otherwise.
+    find "$HOME/.local/share/signal-cli/attachments" -type f -mtime +14 -delete 2>/dev/null
+
+    # The morning nudge for anything queued and still open. Prints nothing when
+    # there is nothing to say, so a quiet day stays quiet. This is the only
+    # thing that ever reads the queue back out: before it, captured reminders
+    # ("call the vet") sat unread indefinitely.
+    send_digest() {
+        digest="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --digest 2>>"$LOG")"
+        if [ -n "$digest" ]; then
+            printf '%s' "$digest" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+                >> "$LOG" 2>&1
+            log "queue digest sent"
+        fi
+    }
+
+    if [ "${#problems[@]}" -eq 0 ]; then
+        log "daily ok"
+        send_digest
+        exit 0
+    fi
+
+    log "daily FAILED: ${problems[*]}"
+    "$HOME/.local/bin/signal-supervise"
+    sleep 8
+
+    if daemon_up && listener_up; then
+        log "daily: recovered by restart"
+        send_digest
+        exit 0
+    fi
+
+    # Still broken. Alert. The direct-send fallback works precisely because
+    # the daemon is down, so the account lock is free.
+    /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+        "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
+        >> "$LOG" 2>&1
+    log "daily: alert sent"
+    ;;
+esac
+
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 800 ]; then
+    tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi

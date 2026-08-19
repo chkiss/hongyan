@@ -1,0 +1,28 @@
+# Secrets and identity — never commit.
+config.json
+*.key
+nous.key
+
+# Runtime state, logs and captured conversation.
+*.log
+*.log.1
+audit.log*
+daemon.log*
+listener.log*
+watchdog.log*
+history.json
+queue.jsonl
+seen.json
+heartbeat
+socket
+*.pid
+down_since
+restart_fails
+monthly-reply-*.txt
+
+# Backups and scratch.
+*.bak
+*.bak-*
+*.tmp
+__pycache__/
+*.pyc
