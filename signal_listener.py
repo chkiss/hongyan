@@ -1127,6 +1127,102 @@ def model_call(model, messages, max_tokens=None):
         return None
 
 
+def model_catalog():
+    """Model ids the endpoint currently offers, or None if it cannot be read."""
+    req = urllib.request.Request(
+        CFG["api_base"] + "/models",
+        headers={
+            "Authorization": "Bearer " + api_key(),
+            # Same trap as the chat endpoint: urllib's default User-Agent 403s.
+            "User-Agent": "signal-listener/1.0",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        audit_fail("model_catalog", str(exc)[:120])
+        return None
+    try:
+        return [m["id"] for m in data.get("data", []) if m.get("id")]
+    except (TypeError, AttributeError):
+        audit_fail("model_catalog", "unexpected shape")
+        return None
+
+
+def configured_models():
+    return {
+        "routing": CFG.get("model_classify"),
+        "answering": CFG.get("model_answer"),
+        "vision": CFG.get("model_vision"),
+    }
+
+
+def check_models():
+    """Report configured models that have vanished, and free models newly on offer.
+
+    Free tiers rotate: a model that is free today can be withdrawn or moved
+    behind credits, and the first symptom is every answer failing with a 404
+    that reads like a broken key. Checking on a schedule turns that into a
+    warning with a named replacement instead of an outage.
+
+    Reports, never switches. Which model answers is a config decision with a
+    real quality trade-off, so it stays a human one — the same reason no model
+    may reach a T2 action.
+    """
+    catalog = model_catalog()
+    if catalog is None:
+        return "Could not read the model catalog — the API may be down or the key rejected."
+
+    lines = []
+    missing = {role: mid for role, mid in configured_models().items()
+               if mid and mid not in catalog}
+    if missing:
+        lines.append("MODELS MISSING from the catalog — these will start failing:")
+        for role, mid in sorted(missing.items()):
+            lines.append("  %s: %s" % (role, mid))
+        free = [m for m in catalog if m.endswith(":free")]
+        if free:
+            lines.append("")
+            lines.append("Still free and available: %s" % ", ".join(sorted(free)))
+        audit_fail("models_missing", ", ".join(sorted(missing.values())))
+
+    known = set(CFG.get("known_free_models") or []) | {
+        m for m in configured_models().values() if m}
+    new_free = sorted(m for m in catalog if m.endswith(":free") and m not in known)
+    if new_free:
+        if lines:
+            lines.append("")
+        lines.append("New free models on offer since last check:")
+        for mid in new_free:
+            lines.append("  %s" % mid)
+        lines.append("")
+        lines.append("Set model_answer / model_classify / model_vision in config to try one.")
+        audit("models_new", ", ".join(new_free))
+
+    if not lines:
+        return ""
+
+    # Remember what has been seen, so a new model is announced once rather than
+    # every month until it is adopted.
+    try:
+        cfg_path = CONFIG_PATH
+        with open(cfg_path) as fh:
+            raw = json.load(fh)
+        raw["known_free_models"] = sorted(
+            set(raw.get("known_free_models") or []) |
+            {m for m in catalog if m.endswith(":free")})
+        tmp = cfg_path + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(raw, fh, indent=2, ensure_ascii=False)
+        os.replace(tmp, cfg_path)
+    except (OSError, ValueError) as exc:
+        audit_fail("models_seen_write", str(exc)[:120])
+
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 # Read-only probes the model may request.
 #
@@ -2186,6 +2282,14 @@ if __name__ == "__main__":
     # can be inspected by hand without messaging anyone.
     if len(sys.argv) > 1 and sys.argv[1] == "--digest":
         text = queue_digest()
+        if text:
+            print(text)
+        sys.exit(0)
+
+    # Same contract as --digest: print something only when there is something
+    # to say, and let the watchdog decide how to deliver it.
+    if len(sys.argv) > 1 and sys.argv[1] == "--check-models":
+        text = check_models()
         if text:
             print(text)
         sys.exit(0)

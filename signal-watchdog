@@ -3,6 +3,8 @@
 #
 #   --restart  (every 10 min)  quietly bring the daemon/listener back if dead
 #   --daily    (once a day)    verify health; alert over Signal only on failure
+#   --models   (monthly)       warn if a configured model has left the free tier,
+#                              and mention free models newly on offer
 #
 # Costs nothing in either mode: no model is called, and a Signal send is free.
 # Claude is never invoked.
@@ -144,6 +146,19 @@ case "$MODE" in
         "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
         >> "$LOG" 2>&1
     log "daily: alert sent"
+    ;;
+--models)
+    # Free tiers rotate. A withdrawn model shows up as every answer failing
+    # with a 404 that looks like a bad key, so check on a schedule and say so
+    # in advance. Reports only — choosing a model stays a human decision.
+    report="$("$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")" \
+        || report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
+    if [ -n "$report" ]; then
+        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" >> "$LOG" 2>&1
+        log "model check: reported"
+    else
+        log "model check: ok"
+    fi
     ;;
 esac
 

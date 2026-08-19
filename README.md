@@ -31,6 +31,10 @@ The whole thing runs on the free tier of [Nous Research's inference API](https:/
 
 Any OpenAI-compatible endpoint works — set `api_base` and `key_file` in the config and name whichever models you like.
 
+Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. So the assistant checks the catalogue monthly and messages you if a model it depends on has gone, naming what is still available. It mentions genuinely new free models too, once each rather than every month until you act.
+
+It reports and never switches. Which model answers is a judgement call about quality, so it stays yours — the same reason no model is allowed to trigger an action.
+
 Free models are the interesting constraint, because the natural worry about pointing a language model at a real server is how much you are willing to trust it. **This design means you don't have to.** The safety of the system does not rest on the model being well-behaved, well-aligned, or even competent — which is exactly what makes free-tier models a practical choice rather than a compromise.
 
 ## How that works
@@ -68,7 +72,7 @@ Signal delivers messages sealed-sender, meaning the sender is hidden from the te
 - **Understands replies.** Reply to any earlier message and that conversation becomes the context, overriding the automatic follow-up detection. It confirms by replying as a Signal quote, so a wrong match is visible immediately instead of producing a baffling answer.
 - **Tracks follow-ups.** A separate step decides which earlier exchanges matter and rewrites your message as a standalone question before anything is looked up, so "what about the plural?" gets researched properly.
 - **Keeps a queue.** Anything that's a task rather than a question is saved and resurfaced in a morning summary until you clear it.
-- **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, and tells you how long it was down once it recovers.
+- **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, tells you how long it was down once it recovers, and warns you monthly if a model it depends on is leaving the free tier.
 - **Never goes quiet.** Every path that drops a message — too old, rate limited, kill switch, unrecognised quote — says so. An unexplained non-reply is indistinguishable from a crash.
 
 ## What it won't do
@@ -77,7 +81,8 @@ It will not run commands, install packages, restart system services, edit files,
 
 ## Requirements
 
-- A Linux server, Python 3, and [signal-cli](https://github.com/AsamK/signal-cli).
+- A Linux server with **256 MB of free RAM** and **500 MB of disk**. Measured on a live install: signal-cli's daemon holds about 137 MB resident and the listener about 26 MB, so roughly 165 MB in normal operation. On disk, signal-cli and its bundled Java runtime are about 356 MB, account state around 9 MB, and this repository under 1 MB. Received photos accumulate in the attachment store and are pruned automatically after 14 days.
+- Python 3 (standard library only — no pip install) and [signal-cli](https://github.com/AsamK/signal-cli).
 - **A second phone number for the bot.** The assistant needs its own Signal account, separate from yours — a free VoIP number works. This isn't incidental: sending yourself a message via Signal's "note to self" produces no notification, so a bot messaging your own account would be silent.
 - An API key for any OpenAI-compatible inference endpoint.
 
@@ -99,7 +104,10 @@ Then add to cron:
 @reboot sleep 30 && /path/to/signal-supervise
 */10 * * * * /path/to/signal-watchdog --restart
 23 8 * * *  /path/to/signal-watchdog --daily
+0 9 1 * *   /path/to/signal-watchdog --models
 ```
+
+Nothing here needs systemd, deliberately: user timers need lingering enabled, which needs root, and this is designed to run as an ordinary unprivileged account.
 
 ## Configuring it for your machine
 
