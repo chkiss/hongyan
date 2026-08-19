@@ -2,7 +2,7 @@
 
 Register this with your agent runner on a monthly schedule. It assumes SSH access to the server as `SSH_TARGET` and no ability for the server to reach back — the bridge is one-way.
 
-The server can do a version of this review by itself (`signal-watchdog --monthly`), and does when `monthly_review` is `local`. This brief exists because an agent with real tooling can do three things the server's own version cannot: judge whether a new model is actually *suited* to the job rather than merely present, propose concrete wiring changes, and apply them once approved.
+The server can do a version of this review by itself (`hongyan-watchdog --monthly`), and does when `monthly_review` is `local`. This brief exists because an agent with real tooling can do three things the server's own version cannot: judge whether a new model is actually *suited* to the job rather than merely present, propose concrete wiring changes, and apply them once approved.
 
 ## 1. Roster and capability gaps
 
@@ -14,7 +14,7 @@ curl -s --max-time 15 "https://portal.nousresearch.com/api/nous/recommended-mode
 
 Compare `freeRecommendedModels`, `freeRecommendedVisionModel` and `freeRecommendedCompactionModel` against the snapshot the server keeps at `~/.config/signal-listener/roster.json`.
 
-For each model in the free roster, compare `inputModalities`, `outputModalities`, `isVisionModel` and `contextLength` against what the listener is wired to handle (`config.json` plus `signal_listener.py`). Propose wiring changes **only where a real gap exists**; if there is none, say so in one line.
+For each model in the free roster, compare `inputModalities`, `outputModalities`, `isVisionModel` and `contextLength` against what the listener is wired to handle (`config.json` plus `hongyan_listener.py`). Propose wiring changes **only where a real gap exists**; if there is none, say so in one line.
 
 Judge suitability, not just availability. A model can be excellent and wrong for this job — one tuned for agentic coding is not the one you want answering questions about grammar or summarising a news page. Name the intended role when you propose a switch.
 
@@ -35,7 +35,7 @@ Do not overfit. Something that appeared once and never recurred is a one-off, no
 Send one Signal message via the server:
 
 ```sh
-ssh SSH_TARGET '~/.local/bin/signal-send.py' <<< "$MESSAGE"
+ssh SSH_TARGET '~/.local/bin/hongyan-send.py' <<< "$MESSAGE"
 ```
 
 Format: a header line, one bullet per proposed change, and a closing approval line. If a category found nothing, say so in one line rather than omitting it. Keep it under eight lines; if it needs more, write the detail somewhere durable and reference it.

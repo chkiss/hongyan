@@ -1,5 +1,5 @@
 #!/bin/bash
-# Signal listener watchdog.
+# hongyan watchdog.
 #
 #   --restart  (every 10 min)  quietly bring the daemon/listener back if dead
 #   --daily    (once a day)    verify health; alert over Signal only on failure
@@ -8,7 +8,7 @@
 # Costs nothing in either mode: no model is called, and a Signal send is free.
 # Claude is never invoked.
 #
-# Liveness uses PID files, not `pgrep -f` — see signal-supervise for why.
+# Liveness uses PID files, not `pgrep -f` — see hongyan-supervise for why.
 set -uo pipefail
 
 DIR="$HOME/.config/signal-listener"
@@ -31,7 +31,7 @@ alive() {
 }
 
 daemon_up() { alive "$DAEMON_PID" "daemon"; }
-listener_up() { alive "$LISTENER_PID" "signal_listener"; }
+listener_up() { alive "$LISTENER_PID" "hongyan_listener"; }
 
 case "$MODE" in
 --restart)
@@ -47,7 +47,7 @@ case "$MODE" in
             mins=$(( ( $(date +%s) - since ) / 60 ))
             log "recovered after ${mins}m down"
             if [ "$mins" -ge 15 ]; then
-                /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+                /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
                     "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
                     >> "$LOG" 2>&1
             fi
@@ -59,7 +59,7 @@ case "$MODE" in
 
     [ -f "$DOWN_SINCE" ] || date +%s > "$DOWN_SINCE"
     log "down (daemon=$(daemon_up && echo y || echo n) listener=$(listener_up && echo y || echo n)) - restarting"
-    "$HOME/.local/bin/signal-supervise"
+    "$HOME/.local/bin/hongyan-supervise"
     sleep 5
     if daemon_up && listener_up; then
         log "restart ok"
@@ -69,7 +69,7 @@ case "$MODE" in
         if [ -f "$DOWN_SINCE" ]; then
             since="$(cat "$DOWN_SINCE" 2>/dev/null || echo 0)"
             mins=$(( ( $(date +%s) - since ) / 60 ))
-            [ "$mins" -ge 15 ] && /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+            [ "$mins" -ge 15 ] && /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
                 "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
                 >> "$LOG" 2>&1
             rm -f "$DOWN_SINCE"
@@ -87,7 +87,7 @@ case "$MODE" in
     # Alert on the second failure (~20 min down), then hourly, so a long
     # outage nags without flooding.
     if [ "$n" -eq 2 ] || { [ "$n" -gt 2 ] && [ $(( n % 6 )) -eq 0 ]; }; then
-        /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+        /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
             "Signal listener is DOWN on hetz — $n restart attempts have failed. Commands are not being processed." \
             >> "$LOG" 2>&1
         log "alert sent (n=$n)"
@@ -115,9 +115,9 @@ case "$MODE" in
     # thing that ever reads the queue back out: before it, captured reminders
     # ("call the vet") sat unread indefinitely.
     send_digest() {
-        digest="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --digest 2>>"$LOG")"
+        digest="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --digest 2>>"$LOG")"
         if [ -n "$digest" ]; then
-            printf '%s' "$digest" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+            printf '%s' "$digest" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
                 >> "$LOG" 2>&1
             log "queue digest sent"
         fi
@@ -126,9 +126,9 @@ case "$MODE" in
     # One HTTP GET. A model that has left the catalogue breaks every answer
     # with a 404 that reads like a bad key, so catch it within a day.
     check_models() {
-        report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
+        report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
         if [ -n "$report" ]; then
-            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
                 >> "$LOG" 2>&1
             log "model check: DEPENDENCY MISSING, reported"
         fi
@@ -142,7 +142,7 @@ case "$MODE" in
     fi
 
     log "daily FAILED: ${problems[*]}"
-    "$HOME/.local/bin/signal-supervise"
+    "$HOME/.local/bin/hongyan-supervise"
     sleep 8
 
     if daemon_up && listener_up; then
@@ -153,7 +153,7 @@ case "$MODE" in
 
     # Still broken. Alert. The direct-send fallback works precisely because
     # the daemon is down, so the account lock is free.
-    /usr/bin/python3 "$HOME/.local/bin/signal-send.py" \
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
         "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
         >> "$LOG" 2>&1
     log "daily: alert sent"
@@ -162,9 +162,9 @@ case "$MODE" in
     # The self-contained monthly review: roster movement, capability gaps and
     # a month of logged defects. Silent when config sets monthly_review to
     # "remote" (a second machine owns it) or "off".
-    report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --monthly 2>>"$LOG")"
+    report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --monthly 2>>"$LOG")"
     if [ -n "$report" ]; then
-        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" >> "$LOG" 2>&1
+        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
         log "monthly review sent"
     else
         log "monthly review: nothing to send"
@@ -173,9 +173,9 @@ case "$MODE" in
 
 --models)
     # Also runnable on its own, for checking by hand after changing a model.
-    report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"
+    report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
     if [ -n "$report" ]; then
-        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" >> "$LOG" 2>&1
+        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
         log "model check: DEPENDENCY MISSING, reported"
     else
         log "model check: ok"

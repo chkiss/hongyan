@@ -94,7 +94,7 @@ install_server() {
 
     say "Linking commands into $BIN"
     local f
-    for f in signal_listener.py signal-supervise signal-watchdog signal-send.py signal-me; do
+    for f in hongyan_listener.py hongyan-supervise hongyan-watchdog hongyan-send.py hongyan-me; do
         [ -e "$REPO/$f" ] || continue
         if [ -e "$BIN/$f" ] && [ ! -L "$BIN/$f" ]; then
             mv "$BIN/$f" "$BIN/$f.pre-install"
@@ -106,11 +106,11 @@ install_server() {
     ok "symlinked to the repository, so git pull updates the running system"
 
     say "Scheduling"
-    add_cron "@reboot" "sleep 30 && $BIN/signal-supervise" "Start at boot"
-    add_cron "*/10 * * * *" "$BIN/signal-watchdog --restart" "Quiet restart if it dies"
-    add_cron "23 8 * * *" "$BIN/signal-watchdog --daily" "Daily health check + queue digest"
+    add_cron "@reboot" "sleep 30 && $BIN/hongyan-supervise" "Start at boot"
+    add_cron "*/10 * * * *" "$BIN/hongyan-watchdog --restart" "Quiet restart if it dies"
+    add_cron "23 8 * * *" "$BIN/hongyan-watchdog --daily" "Daily health check + queue digest"
     if [ "$review_mode" = "local" ]; then
-        add_cron "0 9 1 * *" "$BIN/signal-watchdog --monthly" "Monthly review"
+        add_cron "0 9 1 * *" "$BIN/hongyan-watchdog --monthly" "Monthly review"
     else
         info "monthly review runs on the other machine; no cron line added here"
     fi
@@ -123,7 +123,7 @@ install_server() {
     fi
 
     say "Done"
-    info "Start it with:  $BIN/signal-supervise"
+    info "Start it with:  $BIN/hongyan-supervise"
     info "Then text the bot 'status' from the phone whose ACI you configured."
 }
 

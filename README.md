@@ -2,7 +2,7 @@
 
 A read-only assistant for your own Linux server, reachable over Signal, running entirely on free-tier language models.
 
-*鸿雁 (hóngyàn), "wild goose" — the bird that carries letters in classical Chinese, from the story of an envoy who sent word home tied to a goose's leg. It flies a long way and delivers what it was given. It is not clever, and that is rather the point.*
+*鸿雁 (hóngyàn), "wild goose" — the bird that carries letters in classical Chinese, from the story of an envoy who sent word home tied to a goose's leg. It flies a long way and delivers what it was given without having to be trusted like a courier.*
 
 You text it a question. It works out for itself whether to search the web, read a page, check the server, look at a photo you sent, or just answer — then replies. It can inspect the machine it runs on. It can never change it.
 
@@ -67,6 +67,8 @@ Authorisation is by **ACI** — Signal's own internal account identifier, a UUID
 
 Signal delivers messages sealed-sender, meaning the sender is hidden from the text output entirely — so the JSON API is the only place the real ACI can be read.
 
+It only ever messages its owner. There is no path by which it contacts anyone else: the recipient is fixed in config, nothing reachable by a model can change it, and it never initiates a conversation with a third party or sends anything unsolicited. That is worth stating plainly, because an assistant that replies automatically is the sort of thing messaging platforms reasonably restrict — the rules exist to stop bulk and unsolicited traffic to strangers, and this is a private assistant talking to one consenting person, its owner.
+
 ## What it does
 
 - **Works out its own next step.** Up to five read-only steps per question: search, open a page, probe the server, check the weather, then answer.
@@ -92,14 +94,14 @@ It will not run commands, install packages, restart system services, edit files,
 ## Install
 
 ```sh
-git clone https://github.com/YOURNAME/hongyan
+git clone https://github.com/chkiss/hongyan
 cd hongyan
 ./install.sh
 ```
 
 The installer asks what you're setting up, writes the config, links the commands into `~/.local/bin`, installs the cron entries and runs the tests. It never overwrites an existing config without asking, and re-running it is safe.
 
-Then `./signal-supervise` to start, and text the bot `status`.
+Then `./hongyan-supervise` to start, and text the bot `status`.
 
 Nothing here needs systemd, deliberately: user timers need lingering enabled, which needs root, and this is designed to run as an ordinary unprivileged account.
 

@@ -27,7 +27,7 @@ try:
     BOT = _CFG["bot_number"]
     OWNER = _CFG["owner_number"]
 except (OSError, ValueError, KeyError) as _exc:
-    print("signal-send: cannot read bot_number/owner_number from %s/config.json: %s"
+    print("hongyan-send: cannot read bot_number/owner_number from %s/config.json: %s"
           % (DIR, _exc), file=sys.stderr)
     sys.exit(1)
 
@@ -81,13 +81,13 @@ def main():
     text = " ".join(sys.argv[1:]) if len(sys.argv) > 1 else sys.stdin.read()
     text = text.strip()
     if not text:
-        print("signal-send: empty message", file=sys.stderr)
+        print("hongyan-send: empty message", file=sys.stderr)
         return 1
     if via_socket(text):
         return 0
     if via_cli(text):
         return 0
-    print("signal-send: both socket and direct send failed", file=sys.stderr)
+    print("hongyan-send: both socket and direct send failed", file=sys.stderr)
     return 1
 
 

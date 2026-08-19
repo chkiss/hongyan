@@ -36,8 +36,8 @@ if ! alive "$DAEMON_PID" "daemon"; then
     echo "$(date "+%F %T") daemon started pid $(cat "$DAEMON_PID")" >> "$LOG"
 fi
 
-if [ -S "$SOCK" ] && ! alive "$LISTENER_PID" "signal_listener"; then
-    nohup /usr/bin/python3 "$HOME/.local/bin/signal_listener.py" >> "$LISTENER_LOG" 2>&1 &
+if [ -S "$SOCK" ] && ! alive "$LISTENER_PID" "hongyan_listener"; then
+    nohup /usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" >> "$LISTENER_LOG" 2>&1 &
     echo $! > "$LISTENER_PID"
     echo "$(date "+%F %T") listener started pid $(cat "$LISTENER_PID")" >> "$LISTENER_LOG"
 fi

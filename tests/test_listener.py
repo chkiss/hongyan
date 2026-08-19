@@ -26,7 +26,7 @@ shutil.copy(os.path.join(ROOT, "config.example.json"),
 open(os.path.join(_TMP, ".config", "signal-listener", "nous.key"), "w").write("test-key")
 
 spec = importlib.util.spec_from_file_location(
-    "sl", os.path.join(ROOT, "signal_listener.py"))
+    "sl", os.path.join(ROOT, "hongyan_listener.py"))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
