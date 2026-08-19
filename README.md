@@ -1,6 +1,8 @@
-# signal-assistant
+# 鸿雁 · hongyan
 
 A read-only assistant for your own Linux server, reachable over Signal, running entirely on free-tier language models.
+
+*鸿雁 (hóngyàn), "wild goose" — the bird that carries letters in classical Chinese, from the story of an envoy who sent word home tied to a goose's leg. It flies a long way and delivers what it was given. It is not clever, and that is rather the point.*
 
 You text it a question. It works out for itself whether to search the web, read a page, check the server, look at a photo you sent, or just answer — then replies. It can inspect the machine it runs on. It can never change it.
 
@@ -90,8 +92,8 @@ It will not run commands, install packages, restart system services, edit files,
 ## Install
 
 ```sh
-git clone https://github.com/YOURNAME/signal-assistant
-cd signal-assistant
+git clone https://github.com/YOURNAME/hongyan
+cd hongyan
 ./install.sh
 ```
 

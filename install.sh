@@ -218,7 +218,7 @@ PY" >/dev/null 2>&1; then
 
 # ----------------------------------------------------------------- main ----
 
-say "signal-assistant installer"
+say "鸿雁 hongyan — installer"
 info "One device:  everything on the server, including the monthly review."
 info "Two devices: server here, richer monthly review on another machine"
 info "             with more memory and a full agent."
