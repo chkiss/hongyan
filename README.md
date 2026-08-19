@@ -33,6 +33,8 @@ The whole thing runs on the free tier of [Nous Research's inference API](https:/
 
 Any OpenAI-compatible endpoint works — set `api_base` and `key_file` in the config and name whichever models you like.
 
+Bring your own account and key. hongyan is a client, not a service: it never proxies anyone else’s access, and whichever provider you point it at, you are the one who has accepted their terms. Some providers restrict programmatic clients they did not publish themselves, so if you plan to run it against a free tier, it is worth a quick read of that provider’s acceptable-use section — and worth asking them, since a one-line written answer settles it.
+
 Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. So the daily health check also confirms that the models this install depends on are still in the catalogue, and messages you if one has gone, naming what is still free.
 
 It reports and never switches. Picking a replacement is a judgement call — a model can be excellent and still be wrong for the job, since one tuned for agentic coding is not necessarily the one you want answering questions about grammar — so it stays yours. The same reason no model is allowed to trigger an action.
