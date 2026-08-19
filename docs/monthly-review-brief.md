@@ -12,7 +12,7 @@ Fetch the live roster:
 curl -s --max-time 15 "https://portal.nousresearch.com/api/nous/recommended-models" -H "Accept: application/json"
 ```
 
-Compare `freeRecommendedModels`, `freeRecommendedVisionModel` and `freeRecommendedCompactionModel` against the snapshot the server keeps at `~/.config/signal-listener/roster.json`.
+Compare `freeRecommendedModels`, `freeRecommendedVisionModel` and `freeRecommendedCompactionModel` against the snapshot the server keeps at `~/.config/hongyan/roster.json`.
 
 For each model in the free roster, compare `inputModalities`, `outputModalities`, `isVisionModel` and `contextLength` against what the listener is wired to handle (`config.json` plus `hongyan_listener.py`). Propose wiring changes **only where a real gap exists**; if there is none, say so in one line.
 
@@ -20,7 +20,7 @@ Judge suitability, not just availability. A model can be excellent and wrong for
 
 ## 2. Defects in the log
 
-Read `~/.config/signal-listener/audit.log` **and** its rotated archive `audit.log.1` — the live file holds only the most recent ~800 lines, so a month is usually split across both.
+Read `~/.config/hongyan/audit.log` **and** its rotated archive `audit.log.1` — the live file holds only the most recent ~800 lines, so a month is usually split across both.
 
 Start by grepping for `FAIL:`. The listener tags every defect that way (`FAIL:vision`, `FAIL:quote_unresolved`, `FAIL:model_error`, `FAIL:history_truncated`, …). Anything without that tag is ordinary routing. If `FAIL:` returns nothing, say the log is clean — do not go hunting through normal lines for something to report.
 
@@ -46,8 +46,8 @@ End with: `Reply 'approve' to apply all proposed changes, 'acknowledge' if nothi
 
 The server has no route back to this machine, so replies are matched by keyword and polled for.
 
-1. Before sending, write `~/.config/signal-listener/monthly-reply-keywords-YYYY-MM-DD.txt` on the server — one keyword per line: `approve`, `acknowledge`, plus any custom tokens used in that month's message.
-2. The listener watches owner messages for those keywords and writes `~/.config/signal-listener/monthly-reply-YYYY-MM-DD.txt` when one matches. This is idempotent.
+1. Before sending, write `~/.config/hongyan/monthly-reply-keywords-YYYY-MM-DD.txt` on the server — one keyword per line: `approve`, `acknowledge`, plus any custom tokens used in that month's message.
+2. The listener watches owner messages for those keywords and writes `~/.config/hongyan/monthly-reply-YYYY-MM-DD.txt` when one matches. This is idempotent.
 3. Poll for that file: every 60 seconds for 30 minutes, then hourly for 24 hours. On a match, read it and act. On timeout, log that no reply arrived and stop.
 
 Apply changes only on an explicit `approve`. Everything up to that point is read-only.

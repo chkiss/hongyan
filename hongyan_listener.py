@@ -40,8 +40,8 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
-CONFIG_PATH = os.path.expanduser("~/.config/signal-listener/config.json")
-STATE_DIR = os.path.expanduser("~/.config/signal-listener")
+CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
+STATE_DIR = os.path.expanduser("~/.config/hongyan")
 QUEUE_FILE = os.path.join(STATE_DIR, "queue.jsonl")
 AUDIT_FILE = os.path.join(STATE_DIR, "audit.log")
 SEEN_FILE = os.path.join(STATE_DIR, "seen.json")
@@ -133,7 +133,7 @@ def audit_fail(kind, detail=""):
     logged nothing at all. The monthly review reads this file; a defect that
     does not appear here cannot be found. `FAIL:` makes them greppable:
 
-        grep FAIL: ~/.config/signal-listener/audit.log
+        grep FAIL: ~/.config/hongyan/audit.log
     """
     audit("FAIL:" + kind, detail)
 
@@ -859,7 +859,7 @@ def t2_mute(arg):
 def t2_kill(_arg):
     with open(KILL_FILE, "w") as fh:
         fh.write(datetime.now(timezone.utc).isoformat())
-    return "command processing DISABLED. delete ~/.config/signal-listener/disabled to re-enable"
+    return "command processing DISABLED. delete ~/.config/hongyan/disabled to re-enable"
 
 
 T2 = {
@@ -1110,7 +1110,7 @@ def model_call(model, messages, max_tokens=None):
             "Authorization": "Bearer " + api_key(),
             "Content-Type": "application/json",
             # Required: the endpoint 403s urllib's default User-Agent.
-            "User-Agent": "signal-listener/1.0",
+            "User-Agent": "hongyan/1.0",
             "Accept": "application/json",
         },
     )
@@ -1134,7 +1134,7 @@ def model_catalog():
         headers={
             "Authorization": "Bearer " + api_key(),
             # Same trap as the chat endpoint: urllib's default User-Agent 403s.
-            "User-Agent": "signal-listener/1.0",
+            "User-Agent": "hongyan/1.0",
             "Accept": "application/json",
         },
     )
@@ -1207,7 +1207,7 @@ def fetch_roster():
     url = CFG.get("roster_url", ROSTER_URL)
     req = urllib.request.Request(
         url, headers={"Accept": "application/json",
-                      "User-Agent": "signal-listener/1.0"})
+                      "User-Agent": "hongyan/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.load(resp)

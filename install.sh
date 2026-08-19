@@ -20,7 +20,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-STATE="$HOME/.config/signal-listener"
+STATE="$HOME/.config/hongyan"
 BIN="$HOME/.local/bin"
 CONFIG="$STATE/config.json"
 
@@ -189,7 +189,7 @@ install_review_host() {
     say "Switching the server's review mode to remote"
     if ssh "$target" "python3 - <<'PY'
 import json, os
-p = os.path.expanduser('~/.config/signal-listener/config.json')
+p = os.path.expanduser('~/.config/hongyan/config.json')
 c = json.load(open(p))
 c['monthly_review'] = 'remote'
 json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
@@ -205,7 +205,8 @@ PY" >/dev/null 2>&1; then
     ssh "$target" 'crontab -l 2>/dev/null | grep -v -- "--monthly" | crontab -' >/dev/null 2>&1 \
         && ok "removed" || warn "could not edit the server crontab; check it by hand"
 
-    local brief="$REPO/monthly-review-brief.md"
+    local brief="$HOME/.config/hongyan/monthly-review-brief.md"
+    mkdir -p "$(dirname "$brief")"
     sed "s|SSH_TARGET|$target|g" "$REPO/docs/monthly-review-brief.md" > "$brief" 2>/dev/null \
         || cp "$REPO/docs/monthly-review-brief.md" "$brief" 2>/dev/null
 

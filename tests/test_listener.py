@@ -20,10 +20,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The module reads its config at import time, so give it a throwaway home.
 _TMP = tempfile.mkdtemp(prefix="siglistener-test-")
 os.environ["HOME"] = _TMP
-os.makedirs(os.path.join(_TMP, ".config", "signal-listener"))
+os.makedirs(os.path.join(_TMP, ".config", "hongyan"))
 shutil.copy(os.path.join(ROOT, "config.example.json"),
-            os.path.join(_TMP, ".config", "signal-listener", "config.json"))
-open(os.path.join(_TMP, ".config", "signal-listener", "nous.key"), "w").write("test-key")
+            os.path.join(_TMP, ".config", "hongyan", "config.json"))
+open(os.path.join(_TMP, ".config", "hongyan", "nous.key"), "w").write("test-key")
 
 spec = importlib.util.spec_from_file_location(
     "sl", os.path.join(ROOT, "hongyan_listener.py"))

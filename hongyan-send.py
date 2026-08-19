@@ -14,7 +14,7 @@ import socket
 import subprocess
 import sys
 
-DIR = os.path.expanduser("~/.config/signal-listener")
+DIR = os.path.expanduser("~/.config/hongyan")
 SOCK = os.path.join(DIR, "socket")
 SIGNAL_CLI = os.path.expanduser("~/.local/bin/signal-cli")
 

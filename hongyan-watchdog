@@ -11,7 +11,7 @@
 # Liveness uses PID files, not `pgrep -f` — see hongyan-supervise for why.
 set -uo pipefail
 
-DIR="$HOME/.config/signal-listener"
+DIR="$HOME/.config/hongyan"
 HEARTBEAT="$DIR/heartbeat"
 LOG="$DIR/watchdog.log"
 DAEMON_PID="$DIR/daemon.pid"
