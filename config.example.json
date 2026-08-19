@@ -38,12 +38,12 @@
     "home_dir": "~"
   },
 
-  "_services_note": "How to check each service. type: user | system | port. Getting this wrong reports healthy services as dead — a user unit checked as a system unit always looks inactive, and anything in a container is reachable only as a listening port. unit defaults to the service name.",
+  "_services_note": "How to check each service. type: user | system | port. Getting this wrong reports healthy services as dead — a user service checked as a system service always looks inactive, and anything in a container may have no service entry at all, only a listening port. unit defaults to the service name.",
   "services": {
     "nginx": {"type": "system"},
     "ssh": {"type": "system"},
     "syncthing": {"type": "user", "unit": "syncthing"},
-    "some-container": {"type": "port", "port": 8080}
+    "immich": {"type": "port", "port": 2283}
   },
 
   "_allowed_units_note": "Restartable units. Keep to user units unless the account has passwordless sudo — listing units it cannot touch only produces confusing failures.",
