@@ -158,6 +158,19 @@ case "$MODE" in
         >> "$LOG" 2>&1
     log "daily: alert sent"
     ;;
+--monthly)
+    # The self-contained monthly review: roster movement, capability gaps and
+    # a month of logged defects. Silent when config sets monthly_review to
+    # "remote" (a second machine owns it) or "off".
+    report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --monthly 2>>"$LOG")"
+    if [ -n "$report" ]; then
+        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/signal-send.py" >> "$LOG" 2>&1
+        log "monthly review sent"
+    else
+        log "monthly review: nothing to send"
+    fi
+    ;;
+
 --models)
     # Also runnable on its own, for checking by hand after changing a model.
     report="$(/usr/bin/python3 "$HOME/.local/bin/signal_listener.py" --check-models 2>>"$LOG")"

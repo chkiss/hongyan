@@ -32,6 +32,9 @@
   "_steps_note": "Agent loop budget. The model chooses read-only steps (search / open a page / server probe / weather) until it can answer. Bounded because each step costs a round trip, and because a query composed after reading fetched text is a channel injected content could try to steer.",
   "max_steps": 5,
 
+  "_monthly_review_note": "Who runs the monthly review. 'local' = this machine does it itself (one-device setup). 'remote' = a second machine with a full agent owns it, so this one stays quiet rather than sending a second, contradictory report. 'off' = no review.",
+  "monthly_review": "local",
+
   "_site_note": "How the assistant describes the machine it lives on, and where its home-directory probes look.",
   "site": {
     "label": "my server",

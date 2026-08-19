@@ -1193,6 +1193,176 @@ def check_models():
     return "\n".join(lines)
 
 
+ROSTER_FILE = os.path.join(STATE_DIR, "roster.json")
+ROSTER_URL = "https://portal.nousresearch.com/api/nous/recommended-models"
+
+
+def fetch_roster():
+    """Free-tier roster with capability metadata, or None if unreadable.
+
+    Richer than /v1/models: this carries context length, modalities and the
+    vision flag, which is what makes a capability comparison possible rather
+    than a name match.
+    """
+    url = CFG.get("roster_url", ROSTER_URL)
+    req = urllib.request.Request(
+        url, headers={"Accept": "application/json",
+                      "User-Agent": "signal-listener/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.load(resp)
+    except Exception as exc:  # noqa: BLE001
+        audit_fail("roster_fetch", str(exc)[:120])
+        return None
+
+    out = {}
+    for key in ("freeRecommendedModels", "freeRecommendedVisionModel",
+                "freeRecommendedCompactionModel"):
+        entries = data.get(key) or []
+        if isinstance(entries, dict):
+            entries = [entries]
+        for entry in entries:
+            name = (entry or {}).get("modelName")
+            if not name:
+                continue
+            out[name] = {
+                "context": entry.get("contextLength"),
+                "vision": bool(entry.get("isVisionModel")),
+                "inputs": entry.get("inputModalities") or [],
+            }
+    return out
+
+
+def recent_failures(days=35):
+    """Count FAIL: lines by kind across the live log and its rotated archive.
+
+    A month of history is usually split across both files, because the live one
+    only keeps the most recent ~800 lines. Counting by kind rather than listing
+    every line is what separates a pattern from a one-off.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
+    counts, newest = {}, {}
+    for path in (AUDIT_FILE + ".1", AUDIT_FILE):
+        try:
+            fh = open(path, errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 2 or not parts[1].startswith("FAIL:"):
+                    continue
+                try:
+                    when = datetime.fromisoformat(parts[0]).timestamp()
+                except ValueError:
+                    continue
+                if when < cutoff:
+                    continue
+                kind = parts[1][5:]
+                counts[kind] = counts.get(kind, 0) + 1
+                newest[kind] = parts[2] if len(parts) > 2 else ""
+    return counts, newest
+
+
+def monthly_review():
+    """The self-contained monthly review. Empty string means nothing to report.
+
+    Deliberately deterministic — no model call. A review that exists to catch
+    the assistant misbehaving should not depend on the assistant behaving.
+    """
+    mode = CFG.get("monthly_review", "local")
+    if mode == "off":
+        return ""
+    if mode == "remote":
+        # A second machine owns this review; running it here too would only
+        # produce duplicate messages that disagree with each other.
+        return ""
+
+    lines = []
+
+    # 1. Roster movement and capability gaps.
+    roster = fetch_roster()
+    if roster is None:
+        lines.append("Could not read the model roster this month.")
+    else:
+        try:
+            previous = json.load(open(ROSTER_FILE))
+        except (OSError, ValueError):
+            previous = None
+
+        if previous is not None:
+            added = sorted(set(roster) - set(previous))
+            removed = sorted(set(previous) - set(roster))
+            if added:
+                lines.append("New free models: %s" % ", ".join(added))
+            if removed:
+                lines.append("Withdrawn: %s" % ", ".join(removed))
+            if not added and not removed:
+                lines.append("Free roster unchanged.")
+        else:
+            lines.append("Free roster recorded for the first time (%d models)." % len(roster))
+
+        configured = configured_models()
+        gaps = []
+        for role, mid in configured.items():
+            if mid and mid not in roster:
+                gaps.append("%s model %s is no longer in the free roster" % (role, mid))
+        vision = configured.get("vision")
+        if vision and vision in roster and not roster[vision]["vision"]:
+            gaps.append("%s is configured for vision but is not a vision model" % vision)
+        # A materially larger context window is the one upgrade worth naming
+        # automatically; anything else is a quality judgement for a human.
+        answer = configured.get("answering")
+        if answer and answer in roster and roster[answer].get("context"):
+            here = roster[answer]["context"]
+            bigger = [(n, i["context"]) for n, i in roster.items()
+                      if i.get("context") and i["context"] > here * 2 and not i["vision"]]
+            for name, ctx in sorted(bigger, key=lambda x: -x[1])[:2]:
+                gaps.append("%s offers %s context vs %s on the current answering model"
+                            % (name, ctx, here))
+        if gaps:
+            lines.append("")
+            lines.append("Capability notes:")
+            lines.extend("  - " + g for g in gaps)
+
+        try:
+            tmp = ROSTER_FILE + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump(roster, fh)
+            os.replace(tmp, ROSTER_FILE)
+        except OSError as exc:
+            audit_fail("roster_write", str(exc)[:120])
+
+    # 2. Defects logged since the last review.
+    counts, newest = recent_failures()
+    lines.append("")
+    if not counts:
+        # An empty grep only means something if the log is actually being
+        # written. Two real bugs survived for weeks by failing silently.
+        try:
+            age_days = (time.time() - os.path.getmtime(AUDIT_FILE)) / 86400.0
+        except OSError:
+            age_days = 999
+        if age_days > 2:
+            lines.append("No failures logged — but the audit log has not been "
+                         "written for %.0f days, so treat that as suspicious." % age_days)
+        else:
+            lines.append("No failures logged this month.")
+    else:
+        lines.append("Failures logged this month:")
+        for kind in sorted(counts, key=lambda k: -counts[k]):
+            lines.append("  %s x%d — %s" % (kind, counts[kind], clip(newest.get(kind, ""), 60)))
+        repeated = [k for k, n in counts.items() if n >= 3]
+        if repeated:
+            lines.append("")
+            lines.append("Recurring, worth a look: %s" % ", ".join(sorted(repeated)))
+
+    header = "Monthly check — %s" % datetime.now(timezone.utc).date().isoformat()
+    audit("monthly_review", "%d roster entries, %d failure kinds"
+          % (len(roster or {}), len(counts)))
+    return header + "\n" + "\n".join(lines)
+
+
 # --------------------------------------------------------------------------
 # Read-only probes the model may request.
 #
@@ -2260,6 +2430,12 @@ if __name__ == "__main__":
     # to say, and let the watchdog decide how to deliver it.
     if len(sys.argv) > 1 and sys.argv[1] == "--check-models":
         text = check_models()
+        if text:
+            print(text)
+        sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--monthly":
+        text = monthly_review()
         if text:
             print(text)
         sys.exit(0)

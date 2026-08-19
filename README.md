@@ -73,6 +73,7 @@ Signal delivers messages sealed-sender, meaning the sender is hidden from the te
 - **Tracks follow-ups.** A separate step decides which earlier exchanges matter and rewrites your message as a standalone question before anything is looked up, so "what about the plural?" gets researched properly.
 - **Keeps a queue.** Anything that's a task rather than a question is saved and resurfaced in a morning summary until you clear it.
 - **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, tells you how long it was down once it recovers, and warns you if a model it depends on has left the catalogue.
+- **Reviews itself monthly.** It diffs the free-model roster, flags capability gaps against how it's wired, and summarises the defects it logged — counted by kind, so a recurring fault is distinguishable from a one-off. The review is deliberately plain code with no model call, because something that exists to catch the assistant misbehaving shouldn't depend on the assistant behaving.
 - **Never goes quiet.** Every path that drops a message — too old, rate limited, kill switch, unrecognised quote — says so. An unexplained non-reply is indistinguishable from a crash.
 
 ## What it won't do
@@ -91,22 +92,24 @@ It will not run commands, install packages, restart system services, edit files,
 ```sh
 git clone https://github.com/YOURNAME/signal-assistant
 cd signal-assistant
-cp config.example.json ~/.config/signal-listener/config.json
-$EDITOR ~/.config/signal-listener/config.json      # your ACI, models, services
-printf '%s' "$YOUR_API_KEY" > ~/.config/signal-listener/nous.key
-chmod 600 ~/.config/signal-listener/nous.key
-./signal-supervise                                  # starts the daemon and listener
+./install.sh
 ```
 
-Then add to cron:
+The installer asks what you're setting up, writes the config, links the commands into `~/.local/bin`, installs the cron entries and runs the tests. It never overwrites an existing config without asking, and re-running it is safe.
 
-```cron
-@reboot sleep 30 && /path/to/signal-supervise
-*/10 * * * * /path/to/signal-watchdog --restart
-23 8 * * *  /path/to/signal-watchdog --daily
-```
+Then `./signal-supervise` to start, and text the bot `status`.
 
 Nothing here needs systemd, deliberately: user timers need lingering enabled, which needs root, and this is designed to run as an ordinary unprivileged account.
+
+### One device or two
+
+**One device** is the default: everything runs on the server, including a monthly self-review that checks the model roster for capability gaps, summarises any defects logged that month, and messages you the result. Nothing else is required.
+
+**Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve. Run the installer on each machine and tell it which role it is playing. It points the server's `monthly_review` at `remote` so you don't get two reports that disagree, and writes a brief for the review agent to follow.
+
+The review host reaches the server over SSH. The server never needs to reach back, so it can sit behind NAT with no inbound access, and approvals cross the gap by keyword: the reviewer writes the words it will accept, the listener watches for them in your replies, and the reviewer polls for the match.
+
+Everything the review does is read-only until you reply `approve`.
 
 ## Configuring it for your machine
 
