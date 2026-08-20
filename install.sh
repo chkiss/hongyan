@@ -19,7 +19,8 @@
 
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || REPO=""
+CLONE_URL="${HONGYAN_REPO:-https://github.com/chkiss/hongyan}"
 STATE="$HOME/.config/hongyan"
 BIN="$HOME/.local/bin"
 CONFIG="$STATE/config.json"
@@ -39,6 +40,32 @@ ask() {  # ask <prompt> <default>
         read -r -p "  $prompt: " reply
         printf '%s' "$reply"
     fi
+}
+
+ask_valid() {  # ask_valid <prompt> <regex> <hint> [default]
+    # Validates FORMAT only. Whether the value is the right ACI or a working
+    # key cannot be checked here, and a wrong ACI is the nastiest of the two:
+    # the listener drops unauthorised messages in silence, so the symptom is a
+    # bot that ignores you with no error anywhere. Catching a typo at the point
+    # it is typed is worth the few lines.
+    local prompt="$1" pattern="$2" hint="$3" default="${4:-}" reply tries=0
+    while true; do
+        reply="$(ask "$prompt" "$default")"
+        if printf '%s' "$reply" | grep -Eq "$pattern"; then
+            printf '%s' "$reply"
+            return 0
+        fi
+        tries=$((tries + 1))
+        warn "$hint" >&2
+        if [ "$tries" -ge 3 ]; then
+            # Do not trap someone whose value is legitimately unusual.
+            if confirm "Use \"$reply\" anyway?" >&2; then
+                printf '%s' "$reply"
+                return 0
+            fi
+            tries=0
+        fi
+    done
 }
 
 confirm() {  # confirm <prompt>  -> 0 for yes
@@ -134,13 +161,29 @@ write_config() {
     info "then look for the account identifier."
     echo
     local owner_aci owner_number bot_number api_base key
-    owner_aci="$(ask 'Your ACI (the owner, allowed to command it)')"
-    owner_number="$(ask 'Your phone number, e.g. +15550000001')"
-    bot_number="$(ask "The BOT's phone number (a separate number)")"
-    api_base="$(ask 'API base URL' 'https://inference-api.nousresearch.com/v1')"
-    key="$(ask 'API key (stored mode 600, never committed)')"
+    local uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+    local e164_re='^\+[1-9][0-9]{7,14}$'
 
-    [ -n "$owner_aci" ] || die "An ACI is required — it is the only authentication."
+    owner_aci="$(ask_valid 'Your ACI (the owner, allowed to command it)' "$uuid_re" \
+        'That is not a UUID. It looks like 3f2504e0-4f89-11d3-9a0c-0305e82c3301.')"
+    owner_number="$(ask_valid 'Your phone number' "$e164_re" \
+        'Needs the country code and no spaces, e.g. +15550000001.')"
+    while true; do
+        bot_number="$(ask_valid "The BOT's phone number (a SEPARATE number)" "$e164_re" \
+            'Needs the country code and no spaces, e.g. +15550000002.')"
+        [ "$bot_number" != "$owner_number" ] && break
+        # Worth its own check: with one number the bot would be messaging its
+        # own account, which produces no notification at all — the exact
+        # failure the separate account exists to avoid.
+        warn "The bot needs its own number, different from yours." >&2
+        warn "Messaging your own account produces no notification." >&2
+    done
+    api_base="$(ask 'API base URL' 'https://inference-api.nousresearch.com/v1')"
+    while true; do
+        key="$(ask 'API key (stored mode 600, never committed)')"
+        [ -n "$key" ] && break
+        warn "An API key is required; without it every answer fails." >&2
+    done
 
     printf '%s' "$key" > "$STATE/nous.key"
     chmod 600 "$STATE/nous.key"
@@ -164,6 +207,13 @@ PY
     chmod 600 "$CONFIG"
     ok "wrote $CONFIG"
     info "Edit it to describe your services before relying on the health checks."
+    echo
+    warn "Only the FORMAT of those answers was checked."
+    info "Nothing here can tell whether the ACI is really yours or the key works."
+    info "If the ACI is wrong the bot will simply ignore you — unauthorised"
+    info "messages are dropped on purpose, so there is no error to see."
+    info "Confirm it by texting the bot 'status'. If nothing comes back, check:"
+    info "  tail -f $STATE/audit.log     # a 'rejected' line means the ACI is wrong"
 }
 
 # ----------------------------------------------------------- review host ---
@@ -180,6 +230,31 @@ install_review_host() {
 }
 
 # ----------------------------------------------------------------- main ----
+
+# Piped from curl, there is no checkout to install from and stdin is the
+# script itself. Fetch the code first, then take answers from the terminal.
+SELF_FETCHED=0
+if [ -z "$REPO" ] || [ ! -f "$REPO/hongyan_listener.py" ]; then
+    SELF_FETCHED=1
+    REPO="${HONGYAN_DIR:-$HOME/hongyan}"
+    if [ -d "$REPO/.git" ]; then
+        printf '  Updating existing checkout at %s\n' "$REPO"
+        git -C "$REPO" pull --quiet || printf '  (could not update; using what is there)\n'
+    else
+        command -v git >/dev/null || die "git is required to install this way."
+        printf '  Fetching hongyan into %s\n' "$REPO"
+        git clone --quiet "$CLONE_URL" "$REPO" || die "Could not clone $CLONE_URL"
+    fi
+    [ -f "$REPO/hongyan_listener.py" ] || die "$REPO does not look like a hongyan checkout."
+fi
+
+# Only when piped from curl: stdin is the script, so answers must come from the
+# terminal. Run as a local script, piped input is a legitimate way to drive it
+# (the sandbox does exactly that), so leave stdin alone.
+if [ "$SELF_FETCHED" = 1 ] && [ ! -t 0 ]; then
+    [ -e /dev/tty ] && exec < /dev/tty
+    [ -t 0 ] || die "No terminal for prompts. Clone the repository and run ./install.sh directly."
+fi
 
 say "鸿雁 hongyan — installer"
 info "One device:  everything on the server, including the monthly review."

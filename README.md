@@ -37,7 +37,7 @@ Bring your own account and key. hongyan is a client, not a service: it never pro
 
 Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. hongyan notices from the failure itself — the next time a real message needs that model, it tells you the model looks gone and what the error was, once a day rather than on every attempt.
 
-That is deliberately not a scheduled check. **Nothing here contacts the provider on a timer.** Every request hongyan makes is caused by a person sending it a message, which keeps it squarely a client rather than something running unattended against someone else's service. The one exception is opt-in and off by default: `roster_check` lets the monthly review ask for the current model list, and you should only turn it on if your provider's terms allow programmatic clients.
+That is deliberately not a scheduled check — see [It only acts when you tell it to](#it-only-acts-when-you-tell-it-to).
 
 It reports and never switches. Picking a replacement is a judgement call — a model can be excellent and still be wrong for the job, since one tuned for agentic coding is not necessarily the one you want answering questions about grammar — so it stays yours. The same reason no model is allowed to trigger an action.
 
@@ -52,6 +52,14 @@ When the assistant wants to check the server, it replies with something like `{"
 So the model's output is only ever a menu selection. It has no shell, no filesystem access, no write path, and no credentials in reach.
 
 The useful consequence is that this survives a bad model, a jailbreak buried in a fetched web page, and a prompt-injection attempt in an image caption — because at no point is model output interpreted as an instruction to the machine.
+
+### It only acts when you tell it to
+
+hongyan does nothing on its own initiative. Every message it sends and every request it makes to a model provider is the direct result of you texting it — there is no polling, no background chatter, no unattended traffic against anyone else's service. The only scheduled jobs are local: a watchdog that checks whether its own processes are alive, and a monthly review that reads its own log.
+
+Even the model-availability warning works this way. Rather than polling to ask whether a model still exists, it notices when a real request fails and tells you then, which is both simpler and the moment it first matters.
+
+The one exception is opt-in and off by default: `roster_check` lets the monthly review ask your provider for its current model list. Turn it on only if that provider's terms permit programmatic clients.
 
 ### Permission tiers
 
@@ -97,15 +105,17 @@ It will not run commands, install packages, restart system services, edit files,
 
 ## Install
 
+One command, on the server:
+
 ```sh
-git clone https://github.com/chkiss/hongyan
-cd hongyan
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install.sh | bash
 ```
 
-The installer asks what you're setting up, writes the config, links the commands into `~/.local/bin`, installs the cron entries and runs the tests. It never overwrites an existing config without asking, and re-running it is safe.
+It fetches the code to `~/hongyan`, asks for your ACI, numbers and API key, writes the config, links the commands into `~/.local/bin`, installs the cron entries and runs the tests. Re-running it is safe: it never overwrites a config without asking and never duplicates a cron line.
 
-Then `./hongyan-supervise` to start, and text the bot `status`.
+It checks the *format* of what you type — a UUID that is a UUID, phone numbers with country codes, a bot number that differs from yours — but it cannot tell whether the ACI is really yours or the key works, and it says so. That matters because a wrong ACI fails silently by design: unauthorised messages are dropped without a reply, so the symptom is a bot that ignores you. Text it `status`, and if nothing comes back, `tail ~/.config/hongyan/audit.log` — a `rejected` line means the ACI is wrong.
+
+Then `hongyan-supervise` to start.
 
 Nothing here needs systemd, deliberately: user timers need lingering enabled, which needs root, and this is designed to run as an ordinary unprivileged account.
 
@@ -115,7 +125,7 @@ Nothing here needs systemd, deliberately: user timers need lingering enabled, wh
 
 **Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve.
 
-Set the server up as above, then on the review host — no clone needed:
+Set the server up as above, then on the review host — one command again, and no clone:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install-review-host.sh | bash
