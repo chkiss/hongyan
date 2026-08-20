@@ -3,6 +3,8 @@
   "bot_number": "+15550000000",
   "owner_aci": "00000000-0000-0000-0000-000000000000",
   "owner_number": "+15550000001",
+  "_transport_note": "bot_account (default, recommended) = hongyan has its own Signal account and a second phone number, and can only ever see messages addressed to it. note_to_self = hongyan is a LINKED DEVICE on YOUR account and answers in Note to Self, so no second number is needed — but a linked device receives a copy of every conversation you have, and anyone who compromises this server gets your whole Signal account, not a throwaway bot. Read the README before choosing it.",
+  "transport": "bot_account",
   "socket": "~/.config/hongyan/socket",
   "_freshness_note": "Messages older than this are answered with a notice instead of acted on, so a backlog cannot replay after downtime.",
   "max_message_age_seconds": 900,

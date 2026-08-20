@@ -222,6 +222,50 @@ m.monthly_review()
 check("monthly review made no provider request", reached, [])
 
 
+# -------------------------------------------------------------- transports ---
+section("note-to-self transport")
+
+OWNER = m.CFG["owner_aci"]
+OTHER = "99999999-8888-7777-6666-555555555555"
+
+# Default transport: an ordinary incoming message to the bot's own account.
+m.TRANSPORT = "bot_account"
+data, src = m.extract_message({"sourceUuid": OWNER, "dataMessage": {"message": "hello"}})
+check("bot account reads dataMessage", (data or {}).get("message"), "hello")
+check("bot account reports the sender", src, OWNER)
+
+# Linked-device mode. A linked device receives a copy of EVERY conversation,
+# so the filter is the whole security story: only a note to yourself may pass.
+m.TRANSPORT = "note_to_self"
+note = {"sourceUuid": OWNER,
+        "syncMessage": {"sentMessage": {"message": "what is my disk usage?",
+                                        "destinationUuid": OWNER}}}
+data, src = m.extract_message(note)
+check("note to self is accepted", (data or {}).get("message"), "what is my disk usage?")
+
+# The dangerous case: something the owner sent to a friend. It reaches the
+# linked device identically and must never be read.
+to_friend = {"sourceUuid": OWNER,
+             "syncMessage": {"sentMessage": {"message": "private message to a friend",
+                                             "destinationUuid": OTHER}}}
+check("message to someone else is dropped", m.extract_message(to_friend)[0], None)
+
+# A message FROM someone else, synced to the linked device.
+from_friend = {"sourceUuid": OTHER, "dataMessage": {"message": "hi"}}
+check("incoming from a third party is dropped", m.extract_message(from_friend)[0], None)
+
+# Someone else's note to self, were it ever to arrive.
+theirs = {"sourceUuid": OTHER,
+          "syncMessage": {"sentMessage": {"message": "x", "destinationUuid": OTHER}}}
+check("another account's note to self is dropped", m.extract_message(theirs)[0], None)
+
+# In this mode a plain dataMessage is not the channel and must not be read.
+check("dataMessage ignored in note-to-self mode",
+      m.extract_message({"sourceUuid": OWNER, "dataMessage": {"message": "x"}})[0], None)
+
+m.TRANSPORT = "bot_account"
+
+
 # ------------------------------------------------------------ config load ---
 section("config-driven site description")
 

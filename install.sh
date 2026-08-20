@@ -168,16 +168,55 @@ write_config() {
         'That is not a UUID. It looks like 3f2504e0-4f89-11d3-9a0c-0305e82c3301.')"
     owner_number="$(ask_valid 'Your phone number' "$e164_re" \
         'Needs the country code and no spaces, e.g. +15550000001.')"
-    while true; do
-        bot_number="$(ask_valid "The BOT's phone number (a SEPARATE number)" "$e164_re" \
-            'Needs the country code and no spaces, e.g. +15550000002.')"
-        [ "$bot_number" != "$owner_number" ] && break
-        # Worth its own check: with one number the bot would be messaging its
-        # own account, which produces no notification at all — the exact
-        # failure the separate account exists to avoid.
-        warn "The bot needs its own number, different from yours." >&2
-        warn "Messaging your own account produces no notification." >&2
-    done
+
+    echo
+    info "How should hongyan reach you?"
+    info "  1) Its own Signal account, on a second phone number  (recommended)"
+    info "  2) Note to Self, by linking it as a device on YOUR account"
+    local transport_choice
+    transport_choice="$(ask 'Choice (1/2)' '1')"
+
+    local transport="bot_account"
+    bot_number=""
+    if [ "$transport_choice" = "2" ]; then
+        # The warning goes here, not only in the README: this is the moment the
+        # decision is actually made, and it is not reversible by editing a
+        # config file afterwards — the account has already been linked.
+        echo
+        warn "READ THIS BEFORE CHOOSING NOTE TO SELF"
+        info ""
+        info "  hongyan would be linked as a device on your own Signal account,"
+        info "  the same way Signal Desktop is. A linked device receives a copy"
+        info "  of EVERY conversation you have — not just Note to Self — and can"
+        info "  send messages as you, to anyone."
+        info ""
+        info "  If this server is compromised, your whole Signal identity goes"
+        info "  with it: your private conversations, and the ability to message"
+        info "  your contacts while appearing to be you."
+        info ""
+        info "  With a separate bot account, the worst case is a spare number"
+        info "  that only ever talks to you."
+        info ""
+        if confirm "I understand, and want Note to Self anyway"; then
+            transport="note_to_self"
+            ok "Note to Self selected"
+            info "After this finishes, run:  signal-cli link -n hongyan"
+            info "then scan the QR code with Signal on your phone."
+            info "Revoke it any time under Settings > Linked Devices."
+        else
+            info "Keeping the separate bot account. Good call."
+        fi
+    fi
+
+    if [ "$transport" = "bot_account" ]; then
+        while true; do
+            bot_number="$(ask_valid "The BOT's phone number (a SEPARATE number)" "$e164_re" \
+                'Needs the country code and no spaces, e.g. +15550000002.')"
+            [ "$bot_number" != "$owner_number" ] && break
+            warn "The bot needs its own number, different from yours." >&2
+            warn "One number means it would be messaging its own account." >&2
+        done
+    fi
     api_base="$(ask 'API base URL' 'https://inference-api.nousresearch.com/v1')"
     while true; do
         key="$(ask 'API key (stored mode 600, never committed)')"
@@ -191,9 +230,9 @@ write_config() {
 
     python3 - "$REPO/config.example.json" "$CONFIG" \
              "$owner_aci" "$owner_number" "$bot_number" "$api_base" \
-             "$STATE" "$review_mode" <<'PY'
+             "$STATE" "$review_mode" "$transport" <<'PY'
 import json, sys
-example, target, aci, owner, bot, api, state, review = sys.argv[1:9]
+example, target, aci, owner, bot, api, state, review, transport = sys.argv[1:10]
 cfg = json.load(open(example))
 cfg["owner_aci"] = aci
 cfg["owner_number"] = owner
@@ -202,6 +241,7 @@ cfg["api_base"] = api
 cfg["socket"] = state + "/socket"
 cfg["key_file"] = state + "/nous.key"
 cfg["monthly_review"] = review
+cfg["transport"] = transport
 json.dump(cfg, open(target, "w"), indent=2, ensure_ascii=False)
 PY
     chmod 600 "$CONFIG"

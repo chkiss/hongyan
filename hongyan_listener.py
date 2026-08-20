@@ -2230,6 +2230,11 @@ class Client:
         inline by Signal itself, with no explanatory prefix cluttering the text.
         """
         params = {"recipient": [recipient], "message": text}
+        if TRANSPORT == "note_to_self":
+            # notifySelf, not noteToSelf: a plain sync message to yourself
+            # arrives silently, which would make every alert useless. This
+            # sends a real message to your own account, so the phone rings.
+            params["notifySelf"] = True
         if quote_ts:
             params["quoteTimestamp"] = quote_ts
             if quote_author:
@@ -2301,6 +2306,45 @@ class Client:
             yield item
 
 
+TRANSPORT = CFG.get("transport", "bot_account")
+
+
+def extract_message(env):
+    """Pull the message out of an envelope. Returns (data, sender) or (None, "").
+
+    Two transports, and the difference matters for privacy as much as routing.
+
+    bot_account (default): hongyan has its own Signal account, so the only
+    messages it ever receives are the ones addressed to it. Nothing else is
+    visible to this process, by construction.
+
+    note_to_self: hongyan is a LINKED DEVICE on your own account, so it can
+    read Note to Self — but a linked device receives a copy of EVERYTHING you
+    send and receive, in every conversation. That is why this filter is
+    strict and comes first: anything that is not a note to yourself is dropped
+    here, before the body is read, logged, or passed anywhere else.
+    """
+    if TRANSPORT != "note_to_self":
+        data = env.get("dataMessage")
+        if not data:
+            return None, ""
+        return data, env.get("sourceUuid") or env.get("sourceServiceId") or ""
+
+    # A message you send from your phone reaches a linked device as a sync
+    # message describing what was sent, not as a normal incoming message.
+    sent = (env.get("syncMessage") or {}).get("sentMessage")
+    if not sent:
+        return None, ""
+    source = env.get("sourceUuid") or env.get("sourceServiceId") or ""
+    destination = sent.get("destinationUuid") or sent.get("destinationServiceId") or ""
+    owner = CFG["owner_aci"]
+    # Both ends must be the owner. A message merely SENT by the owner is an
+    # ordinary conversation with somebody else, and hongyan must never read it.
+    if source != owner or destination != owner:
+        return None, ""
+    return sent, source
+
+
 def main():
     os.makedirs(STATE_DIR, exist_ok=True)
     client = Client(CFG["socket"])
@@ -2317,10 +2361,11 @@ def main():
             continue
 
         env = (msg.get("params") or {}).get("envelope") or {}
-        data = env.get("dataMessage") or {}
+        data, source = extract_message(env)
+        if data is None:
+            continue
         body = (data.get("message") or "").strip()
         attachments = data.get("attachments") or []
-        source = env.get("sourceUuid") or env.get("sourceServiceId") or ""
         ts = data.get("timestamp") or env.get("timestamp") or 0
 
         # An image with no caption is still a message. Requiring body text here

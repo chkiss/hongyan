@@ -100,8 +100,33 @@ It will not run commands, install packages, restart system services, edit files,
 
 - A Linux server with **256 MB of free RAM** and **500 MB of disk**. Measured on a live install: signal-cli's daemon holds about 137 MB resident and the listener about 26 MB, so roughly 165 MB in normal operation. On disk, signal-cli and its bundled Java runtime are about 356 MB, account state around 9 MB, and this repository under 1 MB. Received photos accumulate in the attachment store and are pruned automatically after 14 days.
 - Python 3 (standard library only — no pip install) and [signal-cli](https://github.com/AsamK/signal-cli).
-- **A second phone number for the bot.** The assistant needs its own Signal account, separate from yours — a free VoIP number works. This isn't incidental: sending yourself a message via Signal's "note to self" produces no notification, so a bot messaging your own account would be silent.
+- **A second phone number for the bot.** The assistant gets its own Signal account, separate from yours — a free VoIP number works. There is a way to avoid this using Note to Self, but you should read [Note to Self, and why it is not the default](#note-to-self-and-why-it-is-not-the-default) before reaching for it.
 - An API key for any OpenAI-compatible inference endpoint.
+
+## Note to Self, and why it is not the default
+
+Signal already gives you a private thread with yourself, so it is reasonable to ask why hongyan needs a second phone number at all. It doesn't — `transport: "note_to_self"` is supported, and you text your own Note to Self thread instead. Replies come back there, and they do notify: hongyan sends a real message to your account rather than a silent sync message, which is the difference between `--notify-self` and `--note-to-self` in signal-cli.
+
+**But understand what it costs before you choose it.**
+
+To read your Note to Self, hongyan has to be **linked as a device on your own Signal account** — the same mechanism as Signal Desktop. That is a fundamentally different security position from a separate bot account:
+
+> ⚠️ **A linked device receives a copy of every conversation you have.** Not just Note to Self — everything you send and everything you receive, in every chat, from the moment it is linked. And it can send as you, to anyone in your contacts.
+>
+> **If this server is ever compromised, your entire Signal identity goes with it.** An attacker reads your private conversations and messages your contacts while appearing to be you. With a separate bot account, the worst case is a throwaway number that talks only to you.
+>
+> Your server is a machine on the internet running a program that fetches web pages and calls a third-party API. Weigh that honestly against putting your personal messaging account on it.
+
+hongyan does what it can to limit the exposure: the very first thing it does with any message is check that it is a note from you to yourself, and anything else is dropped before the text is read, logged, or passed anywhere. That filter is covered by tests. But it is a filter applied *after* the messages have already arrived on the machine — the data is there either way, and no amount of care in this program changes what a linked device is.
+
+If you use it anyway:
+
+- Set `transport` to `note_to_self` and leave `bot_number` empty.
+- Link with `signal-cli link -n hongyan`, then scan the QR code from Signal on your phone.
+- The link shows up in Signal under **Settings → Linked Devices**. Revoke it there the moment the server is retired, sold, or you suspect it has been touched.
+- Do not link the same account from a second machine as well. One account driven from two places corrupts the session state.
+
+The separate bot account remains the default because a compromised server should cost you a spare phone number, not your messaging history.
 
 ## Install
 
