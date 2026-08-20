@@ -121,7 +121,7 @@ Nothing here needs systemd, deliberately: user timers need lingering enabled, wh
 
 ### One device or two
 
-**One device** is the default: everything runs on the server, including a monthly self-review that checks the model roster for capability gaps, summarises any defects logged that month, and messages you the result. Nothing else is required.
+**One device** is the default: everything runs on the server, including a monthly self-review that summarises the defects it logged that month — counted by kind, so a recurring fault stands out from a one-off — and messages you the result. It reads its own log and nothing else, unless you opt into `roster_check`. Nothing else is required.
 
 **Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve.
 
