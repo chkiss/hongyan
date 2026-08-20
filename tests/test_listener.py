@@ -189,6 +189,39 @@ calls, blocks = loop_calls(lambda n: ("search", "distinct query %d" % n))
 check("distinct searches use the whole budget", blocks, budget)
 
 
+# --------------------------------------------------- provider availability ---
+section("a vanished model reports itself")
+
+# There is no scheduled availability check: nothing may contact the provider on
+# a timer. A model that has gone is detected from a call that actually failed,
+# which is a request a person caused by sending a message.
+sent = []
+m.subprocess.run = lambda *a, **k: sent.append(a[0][-1]) or type("R", (), {"returncode": 0})()
+os.path.exists(m.MODEL_GONE_FILE) and os.remove(m.MODEL_GONE_FILE)
+
+m.note_model_gone("some/model:free", Exception("HTTP Error 404: Not Found"))
+check("404 raises the alarm", len(sent), 1)
+check("names the model", "some/model:free" in sent[0], True)
+
+# A withdrawn model fails on every later call; repeating the warning each time
+# would turn a useful message into noise.
+m.note_model_gone("some/model:free", Exception("HTTP Error 404: Not Found"))
+check("does not repeat within a day", len(sent), 1)
+
+# An ordinary blip is not a disappearance.
+m.note_model_gone("other/model:free", Exception("timed out"))
+check("timeout stays quiet", len(sent), 1)
+m.note_model_gone("other/model:free", Exception("requires available credits"))
+check("credit wall raises the alarm", len(sent), 2)
+
+# The monthly review must not reach the provider unless explicitly allowed.
+check("roster polling is off by default", bool(m.CFG.get("roster_check")), False)
+reached = []
+m.fetch_roster = lambda: reached.append(1) or {}
+m.monthly_review()
+check("monthly review made no provider request", reached, [])
+
+
 # ------------------------------------------------------------ config load ---
 section("config-driven site description")
 

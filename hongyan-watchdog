@@ -3,7 +3,7 @@
 #
 #   --restart  (every 10 min)  quietly bring the daemon/listener back if dead
 #   --daily    (once a day)    verify health; alert over Signal only on failure
-#   --models   (with --daily)  warn if a configured model has left the catalogue
+#   --models   (by hand)       ask the provider what it still offers
 #
 # Costs nothing in either mode: no model is called, and a Signal send is free.
 # Claude is never invoked.
@@ -123,20 +123,12 @@ case "$MODE" in
         fi
     }
 
-    # One HTTP GET. A model that has left the catalogue breaks every answer
-    # with a 404 that reads like a bad key, so catch it within a day.
-    check_models() {
-        report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
-        if [ -n "$report" ]; then
-            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-                >> "$LOG" 2>&1
-            log "model check: DEPENDENCY MISSING, reported"
-        fi
-    }
+    # No provider poll here, deliberately. A model that has gone reports itself
+    # the next time a real message needs it — see note_model_gone — so nothing
+    # contacts the inference API on a timer.
 
     if [ "${#problems[@]}" -eq 0 ]; then
         log "daily ok"
-        check_models
         send_digest
         exit 0
     fi

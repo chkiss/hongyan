@@ -169,52 +169,14 @@ PY
 # ----------------------------------------------------------- review host ---
 
 install_review_host() {
-    say "Review host"
-    info "This machine runs the monthly review against the server over SSH."
-    info "It needs an agent able to read files over SSH and send a message"
-    info "back through the server. It does NOT need signal-cli."
-    echo
-
-    local target
-    target="$(ask 'SSH target for the server, e.g. user@host')"
-    [ -n "$target" ] || die "An SSH target is required."
-
-    say "Testing SSH"
-    if ssh -o ConnectTimeout=10 -o BatchMode=yes "$target" true 2>/dev/null; then
-        ok "reached $target with the key already configured"
-    else
-        die "Could not reach $target non-interactively. Set up key-based SSH first, then re-run."
+    # The review host has its own standalone script, so it can be set up with a
+    # single curl and no clone. Defer to it rather than keeping two copies of
+    # the same logic that can drift apart.
+    local script="$REPO/install-review-host.sh"
+    if [ -f "$script" ]; then
+        exec bash "$script"
     fi
-
-    say "Switching the server's review mode to remote"
-    if ssh "$target" "python3 - <<'PY'
-import json, os
-p = os.path.expanduser('~/.config/hongyan/config.json')
-c = json.load(open(p))
-c['monthly_review'] = 'remote'
-json.dump(c, open(p, 'w'), indent=2, ensure_ascii=False)
-print('ok')
-PY" >/dev/null 2>&1; then
-        ok "server will no longer send its own monthly review"
-    else
-        warn "Could not update the server config — set monthly_review to \"remote\""
-        warn "there by hand, or you will get two reviews that disagree."
-    fi
-
-    say "Removing the server's monthly cron line"
-    ssh "$target" 'crontab -l 2>/dev/null | grep -v -- "--monthly" | crontab -' >/dev/null 2>&1 \
-        && ok "removed" || warn "could not edit the server crontab; check it by hand"
-
-    local brief="$HOME/.config/hongyan/monthly-review-brief.md"
-    mkdir -p "$(dirname "$brief")"
-    sed "s|SSH_TARGET|$target|g" "$REPO/docs/monthly-review-brief.md" > "$brief" 2>/dev/null \
-        || cp "$REPO/docs/monthly-review-brief.md" "$brief" 2>/dev/null
-
-    say "Done"
-    info "A brief for the review agent is at:"
-    info "  $brief"
-    info "Register it with your agent runner on a monthly schedule."
-    info "Everything in it is read-only except the changes you approve."
+    exec bash -c "curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install-review-host.sh | bash"
 }
 
 # ----------------------------------------------------------------- main ----

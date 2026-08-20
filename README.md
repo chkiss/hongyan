@@ -35,7 +35,9 @@ Any OpenAI-compatible endpoint works — set `api_base` and `key_file` in the co
 
 Bring your own account and key. hongyan is a client, not a service: it never proxies anyone else’s access, and whichever provider you point it at, you are the one who has accepted their terms. Some providers restrict programmatic clients they did not publish themselves, so if you plan to run it against a free tier, it is worth a quick read of that provider’s acceptable-use section — and worth asking them, since a one-line written answer settles it.
 
-Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. So the daily health check also confirms that the models this install depends on are still in the catalogue, and messages you if one has gone, naming what is still free.
+Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. hongyan notices from the failure itself — the next time a real message needs that model, it tells you the model looks gone and what the error was, once a day rather than on every attempt.
+
+That is deliberately not a scheduled check. **Nothing here contacts the provider on a timer.** Every request hongyan makes is caused by a person sending it a message, which keeps it squarely a client rather than something running unattended against someone else's service. The one exception is opt-in and off by default: `roster_check` lets the monthly review ask for the current model list, and you should only turn it on if your provider's terms allow programmatic clients.
 
 It reports and never switches. Picking a replacement is a judgement call — a model can be excellent and still be wrong for the job, since one tuned for agentic coding is not necessarily the one you want answering questions about grammar — so it stays yours. The same reason no model is allowed to trigger an action.
 
@@ -111,7 +113,15 @@ Nothing here needs systemd, deliberately: user timers need lingering enabled, wh
 
 **One device** is the default: everything runs on the server, including a monthly self-review that checks the model roster for capability gaps, summarises any defects logged that month, and messages you the result. Nothing else is required.
 
-**Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve. Run the installer on each machine and tell it which role it is playing. It points the server's `monthly_review` at `remote` so you don't get two reports that disagree, and writes a brief for the review agent to follow.
+**Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve.
+
+Set the server up as above, then on the review host — no clone needed:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install-review-host.sh | bash
+```
+
+It checks it can actually reach the server, points the server's `monthly_review` at `remote` so you don't get two reports that disagree, removes the server's own monthly cron line, and writes a brief for the review agent to follow.
 
 The review host reaches the server over SSH. The server never needs to reach back, so it can sit behind NAT with no inbound access, and approvals cross the gap by keyword: the reviewer writes the words it will accept, the listener watches for them in your replies, and the reviewer polls for the match.
 

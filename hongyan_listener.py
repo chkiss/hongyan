@@ -1089,6 +1089,54 @@ def api_key():
         return fh.read().strip()
 
 
+MODEL_GONE_FILE = os.path.join(STATE_DIR, "model_gone.json")
+_MODEL_GONE_RE = re.compile(
+    r"404|not found|no such model|does not exist|unavailable|requires available credits|"
+    r"decommission|deprecat", re.I)
+
+
+def note_model_gone(model, exc):
+    """Report a model that has stopped existing, from a call that really failed.
+
+    This replaces polling the provider. A scheduled availability check would be
+    an unattended request to a service this program is only a client of, and
+    it would tell us nothing a real failure does not — so the failure IS the
+    signal. Every request hongyan makes is therefore caused by a person sending
+    a message; nothing runs against the provider on a timer.
+
+    Alerts once a day per model. A withdrawn model fails on every subsequent
+    call, and repeating the warning would turn a useful message into noise.
+    """
+    text = str(exc)
+    if not _MODEL_GONE_RE.search(text):
+        return  # an ordinary timeout or blip, not a disappearance
+    try:
+        seen = json.load(open(MODEL_GONE_FILE))
+    except (OSError, ValueError):
+        seen = {}
+    if time.time() - seen.get(model, 0) < 86400:
+        return
+    seen[model] = time.time()
+    try:
+        with open(MODEL_GONE_FILE, "w") as fh:
+            json.dump(seen, fh)
+    except OSError:
+        pass
+
+    audit_fail("model_gone", "%s | %s" % (model, clip(text, 100)))
+    roles = [r for r, m in configured_models().items() if m == model] or ["a"]
+    try:
+        subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                          "hongyan-send.py"),
+             "The %s model (%s) is failing and looks like it is no longer available: %s\n\n"
+             "Set a different one in config.json — 'about' lists what is configured."
+             % (roles[0], model, clip(text, 120))],
+            timeout=60, capture_output=True)
+    except Exception as exc2:  # noqa: BLE001
+        audit_fail("model_gone_alert", str(exc2)[:100])
+
+
 def model_call(model, messages, max_tokens=None):
     """Call the model. max_tokens is omitted by default, on purpose.
 
@@ -1119,6 +1167,7 @@ def model_call(model, messages, max_tokens=None):
             data = json.load(resp)
     except Exception as exc:  # noqa: BLE001
         audit_fail("model_error", "%s %s" % (model, exc))
+        note_model_gone(model, exc)
         return None
     try:
         return (data["choices"][0]["message"].get("content") or "").strip()
@@ -1281,8 +1330,17 @@ def monthly_review():
     lines = []
 
     # 1. Roster movement and capability gaps.
-    roster = fetch_roster()
-    if roster is None:
+    #
+    # Off by default. Fetching the roster on a schedule is an unattended
+    # request to the provider, and hongyan is only a client of that service —
+    # every other request it makes is caused by a person sending a message.
+    # Turn it on only if your provider's terms permit programmatic polling.
+    # With it off the review is entirely local, which is where the value is
+    # anyway: the log is the part that finds bugs.
+    roster = fetch_roster() if CFG.get("roster_check") else None
+    if not CFG.get("roster_check"):
+        pass
+    elif roster is None:
         lines.append("Could not read the model roster this month.")
     else:
         try:

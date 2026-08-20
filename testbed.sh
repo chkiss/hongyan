@@ -49,9 +49,16 @@ cat > "$tmp"
 mv "$tmp" "$STORE"
 SH
 
-    # An ssh that isn't. Any target maps to the sandbox's server HOME, so the
-    # review-host flow genuinely reaches "the server" — same commands, same
-    # config edits — without a network, a key, or a second machine.
+    # An ssh that isn't. It maps any target to the sandbox's server HOME, so
+    # the two-device flow really runs — same commands, same config edits — with
+    # no network and no keys.
+    #
+    # It announces itself on every call. A silent stub made the installer print
+    # "ok reached poo@pee.com with the key already configured", which is a lie
+    # a sandbox must never tell: the whole point is to show what would happen,
+    # and a fake success is indistinguishable from a real one.
+    #
+    # Targets containing "unreachable" fail, so the failure path is testable.
     cat > "$STUBS/ssh" <<SH
 #!/bin/bash
 args=()
@@ -61,7 +68,13 @@ for a in "\$@"; do
         *) if [ "\${shift_next:-0}" = 1 ]; then shift_next=0; else args+=("\$a"); fi ;;
     esac
 done
-# args[0] is the target; the rest is the remote command.
+target="\${args[0]:-}"
+printf '\033[35m  [sandbox] ssh %s — simulated, running locally against the sandbox server\033[0m\n' "\$target" >&2
+case "\$target" in
+    *unreachable*)
+        printf 'ssh: connect to host %s: Connection refused\n' "\$target" >&2
+        exit 255 ;;
+esac
 unset 'args[0]'
 cmd="\${args[*]}"
 [ -z "\$cmd" ] && exit 0
@@ -95,11 +108,13 @@ run_review() {
     [ -d "$BED" ] || { echo "No sandbox — run '$0 up' first."; exit 1; }
     [ -f "$SERVER_HOME/.config/hongyan/config.json" ] || {
         echo "Set the server up first: $0 server"; exit 1; }
-    say "Installer as the REVIEW HOST (sandboxed)"
-    echo "  Suggested answers: setup 2, role r, SSH target: anything (it is stubbed)."
+    say "Review-host installer (sandboxed)"
+    echo "  Enter any SSH target — it is simulated and says so."
+    echo "  Use a target containing 'unreachable' to see the failure path."
     echo
     HOME="$REVIEW_HOME" CRONSTORE="$CRON_REVIEW" PATH="$STUBS:$PATH" \
-        bash "$REPO/install.sh"
+        HONGYAN_BRIEF_URL="file://$REPO/docs/monthly-review-brief.md" \
+        bash "$REPO/install-review-host.sh"
 }
 
 show() {
