@@ -1065,7 +1065,9 @@ def cmd_keepalive():
 
 
 UPDATE_LOG = os.path.join(STATE_DIR, "update.log")
-REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+# realpath, not abspath: installs run through a symlink in ~/.local/bin, and
+# git must be asked about the checkout, not about a bin directory.
+REPO_DIR = os.path.dirname(os.path.realpath(__file__))
 
 
 def cmd_code():
