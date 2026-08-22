@@ -172,6 +172,7 @@ m.web_search = lambda q: ("results", "example.com", ["http://ok.test/1"])
 m.fetch_text = lambda u, n=2500: "prose " * 200
 m.fetch_site = lambda h, n=2500: ("prose " * 200, h)
 m.prose_score = lambda t: 999
+_real_run_probe = m.run_probe
 m.run_probe = lambda n: "probe output"
 
 LIMIT = 60
@@ -206,6 +207,10 @@ for label, decider in [
 calls, blocks = loop_calls(lambda n: ("search", "distinct query %d" % n))
 # The point of not charging for a rejection: real work still gets the full run.
 check("distinct searches use the whole budget", blocks, budget)
+
+# Restore what this section stubbed — a leaked probe stub made every later
+# self-knowledge test read "probe output".
+m.run_probe = _real_run_probe
 
 
 # --------------------------------------------------- provider availability ---
@@ -441,11 +446,9 @@ section("review command honours the mode")
 
 _orig_mode = m.CFG.get("monthly_review")
 m.CFG["monthly_review"] = "off"
-check("off explains itself", m.cmd_review(),
-      "(the monthly review is switched off in config)")
+check("off explains itself", "switched off" in m.cmd_review(), True)
 m.CFG["monthly_review"] = "remote"
-check("remote points elsewhere", m.cmd_review(),
-      "(the monthly review runs on your other machine)")
+check("remote points elsewhere", "review host" in m.cmd_review(), True)
 m.CFG["monthly_review"] = _orig_mode if _orig_mode is not None else "local"
 
 
@@ -728,6 +731,49 @@ m._META_RE = _real_meta_re
 m.model_call = _real_mc
 m.route = _real_route
 m.gather = _real_gather
+
+
+# ------------------------------------------------- review mode gating --------
+section("review offers honour the mode")
+
+# A machine whose review is owned elsewhere (monthly_review=remote) must
+# never be offered one — the yes that followed used to vanish into an
+# unaudited parenthetical.
+os.path.exists(m.OFFERS_FILE) and os.remove(m.OFFERS_FILE)
+open(m.QUEUE_FILE, "w").close()
+_orig_review_mode = m.CFG.get("monthly_review")
+
+for mode, want in (("remote", None), ("off", None), ("local", "review")):
+    m.CFG["monthly_review"] = mode
+    check("nudge under monthly_review=%s" % mode, m.nudge_due(), want)
+
+m.CFG["monthly_review"] = "remote"
+reply = m.deliver_nudge("review")
+check("remote explains itself plainly",
+      ("review host" in reply and "quiet" in reply), True)
+rows = [l for l in open(m.AUDIT_FILE) if "review_unavailable" in l]
+check("the silent state change is audited now", len(rows) >= 1, True)
+check("offer consumed without pretending it ran",
+      (m.load_offers()["last_review"], m.load_offers()["review_offer"]["outstanding"]),
+      ("", False))
+
+m.CFG["monthly_review"] = "off"
+check("off explains itself too", "switched off" in m.deliver_nudge("review"), True)
+
+m.CFG["monthly_review"] = _orig_review_mode if _orig_review_mode else "local"
+
+
+# ------------------------------------------------------ self-knowledge -------
+section("the assistant can answer questions about itself")
+
+code = m.run_probe("code")
+check("code probe names running code", code.startswith("running code:"), True)
+check("code probe shows branch sync", "branch:" in code, True)
+
+state = m.run_probe("assistant_state")
+check("covers review arrangement", "monthly review:" in state, True)
+check("covers benched channels", "model channels benched:" in state, True)
+check("covers queue", "queue:" in state, True)
 
 
 # ------------------------------------------------------------- cli flags ---

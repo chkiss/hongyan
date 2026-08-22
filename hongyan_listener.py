@@ -858,8 +858,16 @@ def nudge_due(offers=None):
 
 
 def review_due(offers=None):
-    """A review for this month is owed AND not yet raised this cycle."""
+    """A review for this month is owed AND not yet raised this cycle.
+
+    Only a machine that OWNS its review can be due one. Under 'remote' a
+    second machine runs the review and this one must stay quiet rather than
+    send a second, contradictory report — offering anyway was the bug that
+    made an owner reply yes and get a baffling parenthetical instead.
+    """
     offers = offers if offers is not None else load_offers()
+    if CFG.get("monthly_review", "local") != "local":
+        return False
     if offers["last_review"] == _month_now():
         return False
     return offers["review_offer"].get("stamp") != _month_now()
@@ -933,12 +941,15 @@ def deliver_nudge(which):
         audit("digest_sent", "via yes")
         return cmd_queue()
     mode = CFG.get("monthly_review", "local")
-    if mode == "off":
+    if mode != "local":
+        # A state change with no audit line is how the remote-mode yes
+        # vanished from the record. Say what happened and why, plainly.
         save_offers(offers)
-        return "(the monthly review is switched off in config)"
-    if mode == "remote":
-        save_offers(offers)
-        return "(the monthly review runs on your other machine)"
+        audit("review_unavailable", "mode=%s" % mode)
+        if mode == "off":
+            return "The monthly review is switched off in config.json."
+        return ("The monthly review runs on your separate review host — I stay "
+                "quiet here so you don't get two reports that disagree.")
     report = monthly_review()
     offers["last_review"] = _month_now()
     save_offers(offers)
@@ -985,10 +996,12 @@ def cmd_review(_arg=None):
     the user asked for it by name, which IS the permission.
     """
     mode = CFG.get("monthly_review", "local")
-    if mode == "off":
-        return "(the monthly review is switched off in config)"
-    if mode == "remote":
-        return "(the monthly review runs on your other machine)"
+    if mode != "local":
+        audit("review_unavailable", "mode=%s (command)" % mode)
+        if mode == "off":
+            return "The monthly review is switched off in config.json."
+        return ("The monthly review runs on your separate review host — I stay "
+                "quiet here so you don't get two reports that disagree.")
     report = monthly_review()
     offers = load_offers()
     offers["last_review"] = _month_now()
@@ -1049,6 +1062,63 @@ def cmd_keepalive():
         return "listener alive, heartbeat %ds ago" % age
     except OSError:
         return "no heartbeat file"
+
+
+UPDATE_LOG = os.path.join(STATE_DIR, "update.log")
+REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def cmd_code():
+    """What code this listener is actually running, and how it got there.
+
+    Asked 'when were you last updated?', the model could only answer 'I have
+    no record' — correctly, because nothing exposed the fact. This is that
+    fact. Sync state reads local refs only; no network call on a probe.
+    """
+    q = '"' + REPO_DIR + '"'
+    head = sh("git -C %s log -1 --format='%%h %%cs %%s'" % q, 10).strip()
+    branch = sh("git -C %s status -sb | head -1" % q, 10).strip().lstrip("# ").strip()
+    out = "running code: %s\nbranch: %s" % (head or "(unknown)", branch or "(unknown)")
+    try:
+        with open(UPDATE_LOG) as fh:
+            lines = [l.rstrip() for l in fh if l.strip()]
+        if lines:
+            out += "\nlast update event: %s" % lines[-1]
+    except OSError:
+        pass
+    return out
+
+
+def cmd_assistant_state():
+    """This assistant's own machinery, answerable from fact.
+
+    'is the monthly review running?' used to send the agent off probing
+    top_cpu — it had no probe for its own arrangements. Now it does.
+    """
+    parts = []
+    mode = CFG.get("monthly_review", "local")
+    offers = load_offers()
+    if mode == "remote":
+        parts.append("monthly review: owned by your separate review host "
+                     "(this box stays quiet)")
+    elif mode == "off":
+        parts.append("monthly review: switched off in config")
+    elif offers["last_review"] == _month_now():
+        parts.append("monthly review: already run this month")
+    elif offers["review_offer"].get("stamp") == _month_now():
+        parts.append("monthly review: offered this month, waiting for your yes/no")
+    else:
+        parts.append("monthly review: due — will be offered after your next message")
+    benched = [(m, r.get("why", "")) for m, r in _load_model_state().items()
+               if not _usable(m)]
+    parts.append("model channels benched: %s" %
+                 ("; ".join("%s (%s)" % (m, clip(w, 50)) for m, w in benched) or "none"))
+    pending = pending_items()
+    parts.append("queue: %d open, %d waiting to be raised"
+                 % (len(pending), stale_pending_count()))
+    if _muted():
+        parts.append("muted: yes")
+    return "\n".join(parts)
 
 
 T1 = {
@@ -1996,6 +2066,13 @@ PROBE_REGISTRY = {
     "recent_activity": ("how recent messages were handled: routing, which probes ran, "
                         "whether the web was searched, and which models were used",
                         "__activity__"),
+    # Asked 'when were you last updated?' the honest answer was 'I have no
+    # record' — because nothing exposed one. Now something does.
+    "code": ("which exact code version is running here, its branch sync state, "
+             "and the last auto-update event", "__code__"),
+    "assistant_state": ("this assistant's own machinery: who owns the monthly review, "
+                        "whether one is due or offered, benched model channels, queue counts",
+                        "__assistant__"),
     # `ch` is not in the docker group and sudo wants a password, so container
     # stats come from cgroups instead, labelled by each container's main
     # process name (Bitwarden's stack shows up as Api/Identity/sqlservr).
@@ -2042,6 +2119,10 @@ def run_probe(name):
         return cmd_ip()
     if cmd == "__activity__":
         return cmd_activity()
+    if cmd == "__code__":
+        return cmd_code()
+    if cmd == "__assistant__":
+        return cmd_assistant_state()
     if cmd == "__boot__":
         return cmd_boot()
     if cmd == "__service_times__":
