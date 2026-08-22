@@ -130,6 +130,20 @@ check("digest empty when queue empty", m.queue_digest(), "")
 m.queue_note("remind me about something new")
 check("digest silent for same-day items", m.queue_digest(), "")
 
+# Ranges: 'done 2-3' used to be rejected and each item needed its own text.
+m.queue_note("range item A")
+m.queue_note("range item B")
+m.queue_note("range item C")
+reply = m.t2_done("2-3")
+check("range clears both", reply.startswith("cleared 2:"), True)
+left = [i["text"] for _, i in m.pending_items() if not i.get("done")]
+# Numbered by age: the older note is #1, so 2-3 clears items A and B.
+check("range leaves the neighbours alone",
+      any("something new" in t for t in left)
+      and any("range item C" in t for t in left)
+      and not any("range item B" in t for t in left), True)
+m.t2_done("all")
+
 
 # ------------------------------------------------------- step deduplication ---
 section("near-duplicate steps")
@@ -492,18 +506,44 @@ check("timeout is temporary",
       m.classify_failure("<urlopen error timed out>"), "temporary")
 check("overload is temporary",
       m.classify_failure("HTTP Error 503: Service Unavailable"), "temporary")
-check("rate limit is temporary",
+check("plain rate limit is temporary",
       m.classify_failure("HTTP Error 429: Too Many Requests"), "temporary")
-check("cap wall wants a human",
-      m.classify_failure('402 {"error":{"message":"Free usage exceeded, add credits"}}'),
-      "review")
+# CamelCase counts: the provider emits FreeUsageLimitError, not three words,
+# and a daily cap is a self-healing bench — not a 120s cooldown, not a human.
+check("cap wall is capped",
+      m.classify_failure('429 {"error":{"type":"FreeUsageLimitError"}}'), "capped")
+check("spelled-out cap is capped",
+      m.classify_failure('402 {"message":"Free usage exceeded, add credits"}'),
+      "capped")
 check("withdrawn model wants a human",
-      m.classify_failure("HTTP Error 404: Not Found — no such model"), "review")
+      m.classify_failure("HTTP Error 404: Not Found — no such model"), "gone")
 check("bad key wants a human",
-      m.classify_failure("HTTP Error 401: Unauthorized invalid api key"), "review")
+      m.classify_failure("HTTP Error 401: Unauthorized invalid api key"), "gone")
 # Disabling a channel on evidence we do not understand would be worse than
 # retrying, so unknown errors stay temporary.
 check("unknown error stays temporary", m.classify_failure("something odd"), "temporary")
+
+# The provider's own retry hint sets the bench; a day otherwise.
+hint = ('429 {"error":{"type":"FreeUsageLimitError","message":'
+        '"Free usage exceeded. Retrying in 20h 44m."}}')
+secs = m.bench_seconds_for(hint, m.classify_failure(hint))
+check("retry hint drives the bench (20h44m + buffer)",
+      20 * 3600 + 44 * 60 <= secs <= 21 * 3600 + 44 * 60 + 60, True)
+check("cap without hint benches a day",
+      m.bench_seconds_for("FreeUsageLimitError", "capped"), m.CAP_DEFAULT_SECONDS)
+check("gone benches until a human looks",
+      m.bench_seconds_for("404 no such model", "gone"), None)
+
+
+# ------------------------------------------------------------ dns vs policy ---
+section("dns trouble is not a security block")
+
+allowed, why = m.host_check("http://127.0.0.1:8080/x")
+check("loopback still policy-blocked", (allowed, why), (False, "policy"))
+allowed, why = m.host_check("https://1.1.1.1/")
+check("public literal passes with reason ok", (allowed, why), (True, "ok"))
+allowed, why = m.host_check("http://no-such-host-invalid.invalid/")
+check("unresolvable host says dns, not policy", (allowed, why)[1], "dns")
 
 
 # ------------------------------------------------------------ bench windows ---
@@ -578,12 +618,34 @@ m._request_once = capped_then_ok
 out = m.model_call("routing", [{"role": "user", "content": "hi"}])
 m._request_once = _real_once
 check("fallback still answered", out, "saved by big-pickle")
-check("channel benched indefinitely",
-      m._load_model_state().get("x-preview-f-free", {}).get("until"), None)
-check("alert went out immediately", len(alerts), 1)
-check("alert names the remedy", "use x-preview-f-free" in alerts[0], True)
+rec = m._load_model_state().get("x-preview-f-free") or {}
+check("cap wall benches about a day, not forever",
+      rec.get("until") is not None
+      and time.time() < rec["until"] <= time.time() + 86400 + 60, True)
+check("cap walls raise no Signal page", len(alerts), 0)
 actions = [i for _, i in m.pending_items() if i.get("kind") == "action"]
 check("exactly one action item queued", len(actions), 1)
+check("item says it self-recovers", "auto-recovers" in actions[0]["text"], True)
+
+# A genuinely gone model is the case that waits for a human: indefinite
+# bench, immediate alert, remedy named.
+os.remove(m.MODEL_GONE_FILE)
+
+
+def gone_then_ok(model, messages, max_tokens=None):
+    if model == "big-pickle":
+        return None, "HTTP Error 404: Not Found — no such model"
+    return "saved by hy3", None
+
+
+m._request_once = gone_then_ok
+out = m.model_call("routing", [{"role": "user", "content": "hi"}])
+m._request_once = _real_once
+check("gone model still answered around", out, "saved by hy3")
+check("gone model benched indefinitely",
+      m._load_model_state().get("big-pickle", {}).get("until"), None)
+check("alert went out immediately", len(alerts), 1)
+check("alert names the remedy", "use big-pickle" in alerts[0], True)
 
 # A benched channel is skipped on later calls, so the duplicate-item guard is
 # exercised by raising again directly.

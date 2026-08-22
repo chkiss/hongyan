@@ -731,7 +731,19 @@ def t2_done(arg):
         return "cleared %d item(s)." % len(open_idx)
 
     if not arg.isdigit():
-        return "which one? 'done 2', or 'done all'."
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", arg)
+        if not m:
+            return "which one? 'done 2', 'done 2-4', or 'done all'."
+        lo, hi = sorted((int(m.group(1)), int(m.group(2))))
+        if hi > len(open_idx):
+            return "no open item %d — there are %d." % (hi, len(open_idx))
+        cleared = []
+        for pos in range(lo, hi + 1):
+            cleared.append(items[open_idx[pos - 1]]["text"][:60])
+            items[open_idx[pos - 1]]["done"] = True
+        save_queue(items)
+        audit("queue_done", "%d-%d (%d)" % (lo, hi, len(cleared)))
+        return "cleared %d: %s" % (len(cleared), "; ".join(cleared))
     pos = int(arg)
     if not 1 <= pos <= len(open_idx):
         return "no open item %d — there are %d." % (pos, len(open_idx))
@@ -1653,37 +1665,78 @@ _TEMPORARY_FAILURE_RE = re.compile(
     r"timed? ?out|overload|temporar|bad gateway|\b50[234]\b|too many requests|"
     r"rate.?limit|connection (reset|refused|error)|proxy", re.I)
 
+# Cap walls self-heal when the free tier's window rolls over — benching them
+# "until a human looks" would leave vision dead all day for no reason. CamelCase
+# matters: the provider emits FreeUsageLimitError, not three plain words.
+_CAP_WALL_RE = re.compile(
+    r"freeusage|free usage exceeded|usage.?limit|requires available credits|"
+    r"add credits|insufficient|quota|payment", re.I)
+
+# A retry hint in the error is the provider telling us exactly how long to
+# stay away; honour it instead of guessing.
+_CAP_RETRY_RE = re.compile(
+    r"retrying in\s*(\d+)\s*h(?:ours?)?(?:\s*(\d+)\s*m(?!s))?", re.I)
+
 _REVIEW_FAILURE_RE = re.compile(
     r"404|not found|no such model|does not exist|deprecat|decommission|"
-    r"free usage exceeded|requires available credits|add credits|insufficient|quota|"
-    r"unauthorized|forbidden|invalid.{0,20}key|payment", re.I)
+    r"unauthorized|forbidden|invalid.{0,20}key", re.I)
 
 TEMP_COOLDOWN_SECONDS = 120
+CAP_DEFAULT_SECONDS = 86400
 
 
 def classify_failure(err):
-    """'temporary' | 'review'. Unknown errors stay temporary: disabling a
-    channel on evidence we do not understand would be worse than retrying."""
+    """'temporary' | 'capped' | 'gone'.
+
+    Unknown errors stay temporary: disabling a channel on evidence we do
+    not understand would be worse than retrying. 'capped' benches for the
+    provider's own retry window (or a day); only 'gone' waits for a human.
+    """
     text = str(err or "")
     if _REVIEW_FAILURE_RE.search(text):
-        return "review"
-    if _TEMPORARY_FAILURE_RE.search(text):
-        return "temporary"
+        return "gone"
+    if _CAP_WALL_RE.search(text):
+        return "capped"
     return "temporary"
+
+
+def bench_seconds_for(err, kind):
+    """How long to bench: None means until a human clears it."""
+    if kind == "temporary":
+        return TEMP_COOLDOWN_SECONDS
+    if kind != "capped":
+        return None
+    m = _CAP_RETRY_RE.search(str(err or ""))
+    if m:
+        hinted = int(m.group(1)) * 3600 + int(m.group(2) or 0) * 60 + 600
+        return min(hinted, CAP_DEFAULT_SECONDS)
+    return CAP_DEFAULT_SECONDS
 
 
 def _triage_failures(failures):
     for model, err in failures:
         kind = classify_failure(err)
-        if kind == "temporary":
-            if _usable(model):
-                bench_model(model, err, seconds=TEMP_COOLDOWN_SECONDS)
+        if kind == "gone":
+            # A model that no longer exists waits for a human decision —
+            # benching it "until you look" must not quietly un-disable itself.
+            bench_model(model, err, seconds=None)
+            note_model_gone(model, err)
+            raise_action_item(model, err)
             continue
-        # Review-grade. Bench indefinitely (an already-benched channel cannot
-        # reach here — the walk skips it), alert once a day, raise one item.
-        bench_model(model, err, seconds=None)
-        note_model_gone(model, err)
-        raise_action_item(model, err)
+        seconds = bench_seconds_for(err, kind)
+        state = _load_model_state()
+        rec = state.get(model) or {}
+        already = (not rec.get("until") and rec) or \
+                  (rec.get("until") or 0) > time.time() + seconds
+        if not already:
+            bench_model(model, err, seconds=seconds)
+        if kind == "capped":
+            # Self-healing at the window rollover, but the owner still gets
+            # one action item: degraded quality until then is worth knowing.
+            raise_action_item(
+                model, "%s — auto-recovers by %s"
+                % (clip(err, 90), time.strftime("%H:%M", time.localtime(
+                    time.time() + seconds))))
 
 
 def raise_action_item(model, err):
@@ -2194,29 +2247,55 @@ def web_search(query, limit=5):
     return out, host, urls
 
 
-def _public_host(url):
-    """False unless every address `url`'s host resolves to is public.
+_DNS_VERDICT_TTL_POLICY = 60     # a policy verdict is stable; trust it a minute
+_DNS_VERDICT_TTL_FAILURE = 15    # resolver blips recover; re-ask soon
+_dns_verdicts = {}
 
-    Result URLs come off a third-party search page, so they are semi-trusted
-    input. Without this check a crafted result (or a redirect) could point the
-    fetcher at this machine's own loopback or internal services and feed what
-    it finds back into the reply.
+
+def host_check(url):
+    """(allowed, reason) for fetching url. reason: 'policy' | 'dns'.
+
+    A DNS failure must not wear a security badge: blocking a legitimate
+    site because the resolver hiccuped once sent the model chasing five
+    variants of a reachable missouri.edu page and littering the audit log
+    with FAIL:fetch_blocked. Both verdicts are cached briefly so probing
+    lite./text./m. variants does not mean four fresh lookups apiece.
     """
     host = urllib.parse.urlsplit(url).hostname
     if not host:
-        return False
+        return False, "policy"
+    now = time.time()
+    cached = _dns_verdicts.get(host)
+    if cached:
+        verdict, at, _why = cached
+        ttl = _DNS_VERDICT_TTL_POLICY if verdict else _DNS_VERDICT_TTL_FAILURE
+        if now - at < ttl:
+            return verdict, _why
     try:
         infos = socket.getaddrinfo(host, None)
     except OSError:
-        return False
+        _dns_verdicts[host] = (False, now, "dns")
+        return False, "dns"
     for info in infos:
         try:
             addr = ipaddress.ip_address(info[4][0])
         except ValueError:
-            return False
+            _dns_verdicts[host] = (False, now, "policy")
+            return False, "policy"
         if not addr.is_global:  # covers loopback, RFC1918, link-local, etc.
-            return False
-    return True
+            _dns_verdicts[host] = (False, now, "policy")
+            return False, "policy"
+    _dns_verdicts[host] = (True, now, "ok")
+    return True, "ok"
+
+
+def _public_host(url):
+    """Back-compat wrapper: True unless policy-blocked. DNS failures are NOT
+    policy failures — callers that must distinguish use host_check()."""
+    allowed, _why = host_check(url)
+    # An unresolvable host cannot be verified either way; refusing it is the
+    # safe default, it just must not be logged as a policy violation.
+    return allowed
 
 
 class _SafeRedirects(urllib.request.HTTPRedirectHandler):
@@ -2224,11 +2303,13 @@ class _SafeRedirects(urllib.request.HTTPRedirectHandler):
     fetch_text only sees the first URL; hops after that pass through here."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _public_host(newurl):
-            audit_fail("fetch_blocked", "redirect -> %s" % clip(newurl, 120))
+        allowed, why = host_check(newurl)
+        if not allowed:
+            audit_fail("fetch_blocked" if why == "policy" else "fetch_dns",
+                       "redirect -> %s" % clip(newurl, 120))
             raise urllib.error.HTTPError(
-                req.full_url, code, "blocked redirect to non-public host",
-                headers, fp)
+                req.full_url, code,
+                "blocked redirect (%s host)" % why, headers, fp)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -2238,9 +2319,15 @@ _FETCH_OPENER = urllib.request.build_opener(_SafeRedirects())
 def fetch_text(url, limit=1500):
     if not url.startswith(("http://", "https://")):
         return None
-    if not _public_host(url):
-        audit_fail("fetch_blocked", clip(url, 120))
+    allowed, why = host_check(url)
+    if not allowed:
+        fetch_text.last_refusal = why
+        if why == "policy":
+            audit_fail("fetch_blocked", clip(url, 120))
+        else:
+            audit_fail("fetch_dns", clip(url, 120))
         return None
+    fetch_text.last_refusal = ""
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
@@ -2259,6 +2346,12 @@ def fetch_text(url, limit=1500):
             if not re.search(r"function\s*\(|=>|\{\s*[\w-]+\s*:|;\s*\}|var\s+\w+\s*=", c)]
     text = re.sub(r"\s+", " ", " ".join(keep)).strip()
     return text[:limit] or None
+
+
+# What the last fetch_text refusal was about, for callers that want to tell
+# the model (and the log) DNS-trouble apart from policy. Function attribute
+# keeps the signature every stub in tests relies on.
+fetch_text.last_refusal = ""
 
 
 # Many big sites bury their content under JavaScript or bounce scrapers, but
@@ -2634,6 +2727,9 @@ def gather(text, prior, image_desc, notify, sources):
             if body:
                 block = "[page %s]\n%s" % (host, body)
                 sources.append(host)
+            elif fetch_text.last_refusal == "dns":
+                block = ("[page %s]\n(DNS lookup failed just now — the site is "
+                         "probably fine; try a different source)" % target[:80])
             else:
                 block = "[page %s]\n(could not read it)" % target[:80]
 
