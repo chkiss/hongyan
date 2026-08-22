@@ -123,7 +123,7 @@ install_server() {
 
     say "Linking commands into $BIN"
     local f
-    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-send.py hongyan-me; do
+    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-autoupdate hongyan-send.py hongyan-me; do
         [ -e "$REPO/$f" ] || continue
         if [ -e "$BIN/$f" ] && [ ! -L "$BIN/$f" ]; then
             mv "$BIN/$f" "$BIN/$f.pre-install"
@@ -142,6 +142,15 @@ install_server() {
     # message you sent, and runs only if you reply yes. A scheduled send would
     # be an automated message — Signal's terms forbid that, and so does the
     # design. Type 'review' any time, or 'do the monthly review'.
+    echo
+    if confirm "Pull updates from GitHub automatically (every 15 min)?"; then
+        add_cron "*/15 * * * *" "$BIN/hongyan-autoupdate" \
+            "Fast-forward to origin/main when tests pass"
+        info "Silent on success; alerts over Signal only if an update fails."
+        info "Disable any time: crontab -e, remove the hongyan-autoupdate line."
+    else
+        info "Skipping auto-update. Update by hand with: git -C <checkout> pull"
+    fi
 
     say "Tests"
     if python3 "$REPO/tests/test_listener.py" >/dev/null 2>&1; then

@@ -1,0 +1,102 @@
+#!/bin/bash
+# hongyan auto-update.
+#
+#   (cron, every 15 min)  if origin/main moved: pull fast-forward, run the
+#                         tests, restart the listener only if they pass.
+#
+# Silent when up to date and silent on success — every outbound message must
+# be downstream of one the owner sent, and an update is not a failure. The
+# established exception holds for failures: a broken update alerts at once,
+# because "the bot runs old code" is indistinguishable from nothing.
+#
+# Safety rails:
+#   --ff-only          never merges; divergence needs a human
+#   dirty tree         skip — never clobber a manual hotfix
+#   test gate          a failing suite rolls the checkout back before the
+#                      listener restarts, so the running process keeps the
+#                      last known good code
+#   flock              cron overlap and hand-runs cannot interleave
+
+set -uo pipefail
+
+DIR="$HOME/.config/hongyan"
+LOG="$DIR/update.log"
+
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+REPO="$_hy_dir"
+[ -f "$REPO/hongyan_listener.py" ] || { echo "hongyan-autoupdate: no repo at $REPO" >&2; exit 1; }
+
+if [ -f "$_hy_dir/hongyan-lib.sh" ]; then
+    . "$_hy_dir/hongyan-lib.sh"
+elif [ -f "$HOME/.local/bin/hongyan-lib.sh" ]; then
+    . "$HOME/.local/bin/hongyan-lib.sh"
+fi
+
+mkdir -p "$DIR"
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+LOCK="$DIR/update.lock"
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+cd "$REPO" || exit 1
+
+if [ -n "$(git status --porcelain)" ]; then
+    log "skip: working tree has local changes"
+    exit 0
+fi
+
+git fetch origin main --quiet || {
+    log "fetch failed"
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+        "hongyan auto-update could not reach GitHub — still running $(git rev-parse --short HEAD)." \
+        >> "$LOG" 2>&1
+    exit 1
+}
+
+LOCAL="$(git rev-parse HEAD)"
+REMOTE="$(git rev-parse origin/main)"
+[ "$LOCAL" = "$REMOTE" ] && exit 0
+
+log "updating $(git rev-parse --short HEAD) -> $(git rev-parse --short origin/main)"
+
+git merge --ff-only origin/main >> "$LOG" 2>&1 || {
+    log "refused non-fast-forward — needs a human"
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+        "hongyan's checkout diverged from GitHub; auto-update stopped. Needs a human on hetz." \
+        >> "$LOG" 2>&1
+    exit 1
+}
+
+if ! python3 tests/test_listener.py >> "$LOG" 2>&1; then
+    log "tests FAILED on $(git rev-parse --short HEAD) — rolling back"
+    git reset --hard ORIG_HEAD >> "$LOG" 2>&1
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+        "hongyan update to $(git rev-parse --short origin/main) failed its tests and was rolled back. Still running the previous code." \
+        >> "$LOG" 2>&1
+    exit 1
+fi
+
+# Restart only the listener: the daemon rarely changes and owns the account
+# lock. A dead pid file means it was already down — supervise handles both.
+LISTENER_PID="$DIR/listener.pid"
+if [ -f "$LISTENER_PID" ]; then
+    kill "$(cat "$LISTENER_PID")" 2>/dev/null
+    sleep 1
+fi
+"$HOME/.local/bin/hongyan-supervise"
+sleep 3
+
+if hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
+    log "now running $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
+else
+    log "restart FAILED after update to $(git rev-parse --short HEAD)"
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+        "hongyan updated but the listener did not come back up. Watchdog will keep trying; check ~/.config/hongyan/listener.log." \
+        >> "$LOG" 2>&1
+    exit 1
+fi
+
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 500 ]; then
+    tail -n 150 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
