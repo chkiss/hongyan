@@ -7,8 +7,4 @@
 # `signal-cli send` would fail while it is up.
 set -euo pipefail
 
-if [ "$#" -gt 0 ]; then
-    exec /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" "$@"
-else
-    exec /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py"
-fi
+exec /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" "$@"

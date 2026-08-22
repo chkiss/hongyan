@@ -18,18 +18,32 @@ DIR = os.path.expanduser("~/.config/hongyan")
 SOCK = os.path.join(DIR, "socket")
 SIGNAL_CLI = os.path.expanduser("~/.local/bin/signal-cli")
 
-# Numbers come from the same config the listener reads. They were hardcoded
-# here, which is the one thing that made this file unpublishable — and it meant
-# two places to edit if a number ever changed.
 try:
     with open(os.path.join(DIR, "config.json")) as _fh:
         _CFG = json.load(_fh)
-    BOT = _CFG["bot_number"]
-    OWNER = _CFG["owner_number"]
-except (OSError, ValueError, KeyError) as _exc:
-    print("hongyan-send: cannot read bot_number/owner_number from %s/config.json: %s"
-          % (DIR, _exc), file=sys.stderr)
+except (OSError, ValueError) as _exc:
+    print("hongyan-send: cannot read %s/config.json: %s" % (DIR, _exc),
+          file=sys.stderr)
     sys.exit(1)
+
+OWNER = _CFG.get("owner_number")
+if not OWNER:
+    print("hongyan-send: owner_number missing from %s/config.json" % DIR,
+          file=sys.stderr)
+    sys.exit(1)
+
+TRANSPORT = _CFG.get("transport", "bot_account")
+
+
+def bot_number():
+    """The bot's own number, or None when the config has none.
+
+    Only the direct signal-cli fallback needs it. note_to_self installs have no
+    bot account at all — demanding one here at import time killed every send,
+    including the socket path that never uses it and the watchdog alerts that
+    depend on them.
+    """
+    return _CFG.get("bot_number") or None
 
 
 def via_socket(text):
@@ -39,8 +53,13 @@ def via_socket(text):
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(30)
         s.connect(SOCK)
+        params = {"recipient": [OWNER], "message": text}
+        if TRANSPORT == "note_to_self":
+            # Same as the listener's own sends: without this the message
+            # arrives as a silent sync note and nobody sees it.
+            params["notifySelf"] = True
         req = {"jsonrpc": "2.0", "id": "send1", "method": "send",
-               "params": {"recipient": [OWNER], "message": text}}
+               "params": params}
         s.sendall((json.dumps(req) + "\n").encode())
         # Read until we see our response id, ignoring unrelated notifications.
         buf = b""
@@ -69,8 +88,11 @@ def via_socket(text):
 
 
 def via_cli(text):
+    bot = bot_number()
+    if not bot:
+        return False
     try:
-        r = subprocess.run([SIGNAL_CLI, "-a", BOT, "send", "-m", text, OWNER],
+        r = subprocess.run([SIGNAL_CLI, "-a", bot, "send", "-m", text, OWNER],
                            capture_output=True, text=True, timeout=120)
         return r.returncode == 0
     except Exception:
