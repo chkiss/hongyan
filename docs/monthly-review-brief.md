@@ -2,21 +2,25 @@
 
 Register this with your agent runner on a monthly schedule. It assumes SSH access to the server as `SSH_TARGET` and no ability for the server to reach back — the bridge is one-way.
 
-The server can do a version of this review by itself (`hongyan-watchdog --monthly`), and does when `monthly_review` is `local`. This brief exists because an agent with real tooling can do three things the server's own version cannot: judge whether a new model is actually *suited* to the job rather than merely present, propose concrete wiring changes, and apply them once approved.
+The server can do a version of this review by itself (offered in conversation when `monthly_review` is `local`). This brief exists because an agent with real tooling can do three things the server's own version cannot: judge whether a new model is actually *suited* to the job rather than merely present, propose concrete wiring changes, and apply them once approved.
+
+## 0. When to run
+
+Only after the owner has messaged the server this month. Check the newest `YYYY-MM` prefix in `~/.config/hongyan/audit.log` over SSH: if no entry is dated this month, the month has produced no conversation and there is nothing to review yet — exit quietly. No scheduled send may ever precede a message the owner sent.
 
 ## 1. Roster and capability gaps
 
-Fetch the live roster:
+Fetch the live catalogue:
 
 ```sh
-curl -s --max-time 15 "https://portal.nousresearch.com/api/nous/recommended-models" -H "Accept: application/json"
+curl -s --max-time 15 "https://opencode.ai/zen/v1/models" -H "Accept: application/json"
 ```
 
-Compare `freeRecommendedModels`, `freeRecommendedVisionModel` and `freeRecommendedCompactionModel` against the snapshot the server keeps at `~/.config/hongyan/roster.json`.
+Compare against what the server actually runs: `text_chain` and `vision_chain` in `~/.config/hongyan/config.json`. Free identifiers end in `-free`; the stealth previews are `x-preview-f-free` (Ox Alpha) and `big-pickle`. Pricing lives at https://opencode.ai/zen.
 
-For each model in the free roster, compare `inputModalities`, `outputModalities`, `isVisionModel` and `contextLength` against what the listener is wired to handle (`config.json` plus `hongyan_listener.py`). Propose wiring changes **only where a real gap exists**; if there is none, say so in one line.
+For each configured model check: presence in the catalogue, cost (Free vs paid), context length, and image-input capability — every `vision_chain` entry must accept images or photo questions break. Judge suitability, not just availability: a model tuned for agentic coding is not the one you want answering grammar questions. Propose wiring changes **only where a real gap exists**; if none, say so in one line.
 
-Judge suitability, not just availability. A model can be excellent and wrong for this job — one tuned for agentic coding is not the one you want answering questions about grammar or summarising a news page. Name the intended role when you propose a switch.
+Also read `~/.config/hongyan/model_state.json`: each benched channel with `"until": null` is disabled awaiting a human decision — recurring bench patterns (`FAIL:model_benched` in the log) belong in the report. Queue items of kind `action` are unresolved decisions the owner has been promised about.
 
 ## 2. Defects in the log
 

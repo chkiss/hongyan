@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+Monthly review driver for the REVIEW HOST of a two-device hongyan install.
+
+Runs the review through the same model chain as the server (Ox Alpha Free,
+then Big Pickle, then the Hermes tier, via OpenCode Zen) — but pull-only:
+nothing happens until the owner's first message of the month has reached
+the server. No cron send can ever precede a human conversation.
+
+  --tick      hourly cron mode: maybe run the review; maybe poll an approval
+  --dry-run   gather and judge, print the report, write nothing anywhere
+
+State lives in ~/.config/hongyan/ on THIS machine:
+  monthly-review-done-YYYY-MM     this month's review was sent
+  monthly-review-pending.json     report sent, awaiting approve/acknowledge
+"""
+
+import datetime
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+SSH = os.environ.get("HONGYAN_SSH", "hetz.chkiss.com")
+STATE_DIR = os.path.expanduser("~/.config/hongyan")
+ZEN_BASE = "https://opencode.ai/zen/v1"
+CHAIN = ["x-preview-f-free", "big-pickle", "hy3-free"]
+APPROVABLE_KEYS = {"text_chain", "vision_chain"}
+
+
+def _month():
+    return datetime.date.today().strftime("%Y-%m")
+
+
+def _today():
+    return datetime.date.today().isoformat()
+
+
+def ssh(cmd, timeout=30):
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o",
+                        "ConnectTimeout=10", SSH, cmd],
+                       capture_output=True, text=True, timeout=timeout)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+# --------------------------------------------------------------- triggers ---
+
+def first_message_happened():
+    """True once any audit event this month exists — i.e. the owner talked."""
+    out = ssh("grep -c '^%s' ~/.config/hongyan/audit.log "
+              "~/.config/hongyan/audit.log.1 2>/dev/null | awk -F: '{s+=$NF} END{print s+0}'"
+              % _month())
+    return out.strip() not in ("", "0")
+
+
+def already_done():
+    return os.path.exists(os.path.join(
+        STATE_DIR, "monthly-review-done-%s" % _month()))
+
+
+def mark_done():
+    with open(os.path.join(STATE_DIR, "monthly-review-done-%s" % _month()),
+              "w") as fh:
+        fh.write(_today())
+
+
+def pending_path():
+    return os.path.join(STATE_DIR, "monthly-review-pending.json")
+
+
+def load_pending():
+    try:
+        with open(pending_path()) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def save_pending(state):
+    tmp = pending_path() + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, pending_path())
+
+
+# ----------------------------------------------------------------- gather ---
+
+def fetch_catalogue():
+    req = urllib.request.Request(ZEN_BASE + "/models",
+                                 headers={"Accept": "application/json",
+                                          "User-Agent": "hongyan-reviewer/1.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = json.load(resp)
+    out = {}
+    for m in data.get("data", []):
+        mid = m.get("id")
+        if not mid:
+            continue
+        out[mid] = {k: m.get(k) for k in
+                    ("context_length", "input_modalities", "is_vision") if m.get(k)}
+    return out
+
+
+def gather():
+    cfg = json.loads(ssh("cat ~/.config/hongyan/config.json"))
+    fails = ssh("grep -h 'FAIL:' ~/.config/hongyan/audit.log "
+                "~/.config/hongyan/audit.log.1 2>/dev/null | tail -80")
+    counts = {}
+    for line in fails.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            counts[parts[1][5:]] = counts.get(parts[1][5:], 0) + 1
+    state = {}
+    raw = ssh("cat ~/.config/hongyan/model_state.json 2>/dev/null")
+    if raw:
+        state = json.loads(raw or "{}")
+    queue = json.loads(ssh("python3 -c \"import json,os;"
+                           "items=[json.loads(l) for l in open(os.path.expanduser("
+                           "'~/.config/hongyan/queue.jsonl'))] if os.path.exists("
+                           "os.path.expanduser('~/.config/hongyan/queue.jsonl')) else [];"
+                           "print(json.dumps({'open':sum(1 for i in items if not i.get('done')),"
+                           "'actions':sum(1 for i in items if not i.get('done') and "
+                           "i.get('kind')=='action')}))\"") or "{}")
+    version = ssh("git -C ~/programoj/hongyan log -1 --format='%h %cs %s'")
+    return {"cfg": cfg, "fail_counts": counts, "model_state": state,
+            "queue": queue, "version": version}
+
+
+# ------------------------------------------------------------------ judge ---
+
+def chain_call(messages):
+    """Walk the chain; same order as prod. Returns (text, model_used)."""
+    payload_base = {"messages": messages, "temperature": 0}
+    last_err = ""
+    for model in CHAIN:
+        body = json.dumps(dict(payload_base, model=model)).encode()
+        req = urllib.request.Request(
+            ZEN_BASE + "/chat/completions", data=body,
+            headers={"Content-Type": "application/json",
+                     "User-Agent": "hongyan-reviewer/1.0",
+                     "Accept": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                data = json.load(resp)
+            content = (data["choices"][0]["message"].get("content") or "").strip()
+            if content:
+                return content, model
+            last_err = "empty content"
+        except Exception as exc:  # noqa: BLE001 - fall down the chain
+            last_err = str(exc)[:120]
+    raise RuntimeError("all review models failed; last: %s" % last_err)
+
+
+SYSTEM_PROMPT = (
+    "You are the MONTHLY REVIEWER for a hongyan assistant server (two-device "
+    "setup: you run elsewhere and audit over SSH). Reply with ONLY JSON:\n"
+    '{"report":"<max 8 short lines: header, one bullet per finding, closing '
+    'approval line>","proposals":[{"type":"set_config","key":"text_chain|'
+    'vision_chain","value":[...]}]|[]}\n'
+    "Rules: judge whether configured models are SUITED to their roles, not just "
+    "present; vision chains must accept image input. Report genuine recurring "
+    "FAIL: defects only — never transient 503/timeouts or ordinary routing. "
+    "Benched channels with until=null await a human; say so if stale. If a "
+    "category is clean, one line saying so. Propose set_config ONLY for "
+    "reordering/replacing text_chain or vision_chain entries using model ids "
+    "present in the catalogue you were given. End the report with exactly: "
+    "Reply 'approve' to apply all proposed changes, 'acknowledge' if nothing to do, "
+    "or describe the failure if I missed something.")
+
+
+def judge(data, catalogue):
+    prompt = ("%s\n\nCATALOGUE (id -> metadata): %s\n\nSERVER CONFIG: %s\n\n"
+              "BENCHED CHANNELS: %s\n\nQUEUE: %s\n\nRUNNING CODE: %s\n\n"
+              "FAILURE COUNTS THIS MONTH (kind xN, newest sample after pipe):\n%s"
+              % (SYSTEM_PROMPT, json.dumps(catalogue)[:4000],
+                 json.dumps({k: data["cfg"].get(k) for k in
+                             ("api_base", "text_chain", "vision_chain",
+                              "monthly_review")}),
+                 json.dumps(data["model_state"])[:1500],
+                 json.dumps(data["queue"]),
+                 data["version"] or "(unknown)",
+                 "\n".join("%s x%d" % (k, v) for k, v in
+                           sorted(data["fail_counts"].items(),
+                                  key=lambda x: -x[1]))[:2000]))
+    text, used = chain_call([{"role": "system", "content": prompt},
+                             {"role": "user",
+                              "content": "Produce this month's review JSON."}])
+    import re
+    m = re.search(r"\{.*\}", text, re.S)
+    # strict=False: models put real newlines inside the "report" string, and
+    # refusing to read an honest answer over a formatting technicality would
+    # kill the review on its first run.
+    obj = json.loads(m.group(0), strict=False) if m else {}
+    proposals = [p for p in obj.get("proposals") or []
+                 if isinstance(p, dict)
+                 and p.get("type") == "set_config"
+                 and p.get("key") in APPROVABLE_KEYS
+                 and isinstance(p.get("value"), list)]
+    return obj.get("report", "").strip(), proposals, used
+
+
+# ------------------------------------------------------------ send / poll ---
+
+CLOSING = ("Reply 'approve' to apply all proposed changes, 'acknowledge' if "
+           "nothing to do, or describe the failure if I missed something.")
+
+
+def send_report(report, proposals):
+    keywords = ["approve", "acknowledge"]
+    kw_file = "monthly-reply-keywords-%s.txt" % _today()
+    ssh("printf '%s\\n' %s > ~/.config/hongyan/%s"
+        % ("\\n".join(keywords), " ".join(keywords), kw_file))
+    full = report if CLOSING in report else report + "\n" + CLOSING
+    subprocess.run(["ssh", "-o", "BatchMode=yes", SSH,
+                    "~/.local/bin/hongyan-send.py"],
+                   input=full + "\n", text=True, timeout=60, check=True)
+    save_pending({"sent": _today(), "keywords_file": kw_file,
+                  "expires": time.time() + 48 * 3600,
+                  "proposals": proposals})
+    print("review sent (%d proposal(s)); awaiting reply" % len(proposals))
+
+
+def apply_proposals(proposals):
+    applied = []
+    for p in proposals:
+        key, value = p["key"], json.dumps(p["value"])
+        script = ("import json,os;p=os.path.expanduser('~/.config/hongyan/config.json');"
+                  "c=json.load(open(p));c[%r]=json.loads('%s');"
+                  "json.dump(c,open(p,'w'),indent=2,ensure_ascii=False)" % (key, value))
+        if ssh("python3 -c %s && echo APPLIED" % json.dumps(script)) .endswith("APPLIED"):
+            applied.append(key)
+    if applied:
+        pid = ssh("cat ~/.config/hongyan/listener.pid")
+        if pid:
+            ssh("kill %s; sleep 1; ~/.local/bin/hongyan-supervise" % pid)
+    return applied
+
+
+def tick(dry=False):
+    pend = load_pending()
+    if pend:
+        reply = ssh("cat ~/.config/hongyan/monthly-reply-%s 2>/dev/null"
+                    % pend["sent"])
+        now = time.time()
+        if "approve" in reply.lower().split() or reply.strip().lower() == "approve":
+            if dry:
+                print("(dry) would apply:", pend["proposals"]); return
+            applied = apply_proposals(pend["proposals"])
+            msg = ("Approval received — applied: %s." % ", ".join(applied)
+                   if applied else
+                   "Approval received, but no changes were auto-appliable; they need hands.")
+            subprocess.run(["ssh", "-o", "BatchMode=yes", SSH,
+                            "~/.local/bin/hongyan-send.py"],
+                           input=msg + "\n", text=True, timeout=60)
+            os.remove(pending_path()); mark_done()
+        elif reply.strip().lower() == "acknowledge":
+            os.remove(pending_path()); mark_done()
+            print("acknowledged.")
+        elif now > pend["expires"]:
+            os.remove(pending_path())  # brief: log that no reply arrived, stop.
+            print("approval window expired without a reply; standing down.")
+        else:
+            print("still awaiting reply (%s)" % pend["sent"])
+        return
+
+    if dry:
+        data, catalogue = gather(), fetch_catalogue()
+        report, proposals, used = judge(data, catalogue)
+        print("[model: %s]\n%s" % (used, report))
+        print("\nproposals:", json.dumps(proposals, indent=2))
+        return
+    if already_done():
+        return
+    if not first_message_happened():
+        print("no owner message yet this month; staying quiet.")
+        return
+    data, catalogue = gather(), fetch_catalogue()
+    report, proposals, used = judge(data, catalogue)
+    print("[judged by %s]" % used)
+    send_report(report, proposals)
+    mark_done()
+
+
+if __name__ == "__main__":
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if "--dry-run" in sys.argv:
+        tick(dry=True)
+    else:
+        tick()
