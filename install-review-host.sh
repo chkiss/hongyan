@@ -6,13 +6,13 @@
 # The review host does not run the assistant. It reaches the server over SSH
 # once a month, reads the log and config, and messages you through the server.
 # So it needs no signal-cli, no API key and no config of its own — only SSH
-# access and the brief this script writes.
+# access, the brief, and the runner that executes it on schedule.
 #
 # Piping a script from the internet into a shell deserves suspicion, so: this
-# one writes exactly two things, both under ~/.config/hongyan, and the only
+# one writes exactly three things under your home (the brief, the runner, the
+# target pointer), plus one optional crontab line if you say yes. The only
 # machine it modifies besides this one is the server you name, where it sets
-# monthly_review to "remote" and removes the server's own monthly cron line.
-# Read it first if you would rather; it is short.
+# monthly_review to "remote". Read it first if you would rather; it is short.
 
 set -uo pipefail
 
@@ -107,9 +107,42 @@ fi
 sed -i "s|SSH_TARGET|$TARGET|g" "$BRIEF" 2>/dev/null || true
 ok "wrote $BRIEF"
 
+say "Installing the monthly review runner"
+# The brief used to end at 'register this with your agent runner' — which is
+# where setups went to die: nothing registered anything, and the reviewed
+# server sat in remote mode forever waiting for a reviewer that did not
+# exist. The runner is part of the setup now, not a homework note.
+RUNNER="$HOME/.local/bin/hongyan-monthly-review"
+BASE_URL="${BRIEF_URL%/*}"
+if command -v curl >/dev/null; then
+    curl -fsSL "$BASE_URL/hongyan-monthly-review" -o "$RUNNER" \
+        || die "Could not download the runner from $BASE_URL"
+elif command -v wget >/dev/null; then
+    wget -qO "$RUNNER" "$BASE_URL/hongyan-monthly-review" \
+        || die "Could not download the runner from $BASE_URL"
+fi
+chmod +x "$RUNNER"
+printf '%s\n' "$TARGET" > "$DEST/review-target"
+ok "wrote $RUNNER (target: $TARGET)"
+
+echo
+if confirm "Check hourly for review time? Silent until you message the bot first."; then
+    CRON_LINE="23 * * * * $RUNNER --tick >> $DEST/review.log 2>&1"
+    if crontab -l 2>/dev/null | grep -Fq hongyan-monthly-review; then
+        info "cron already has the runner"
+    else
+        { crontab -l 2>/dev/null; echo "$CRON_LINE"; } | crontab -
+        ok "cron: hourly check; sends only after your first message of the month"
+    fi
+    info "Skip a month by hand: touch $DEST/monthly-review-done-\$(date +%Y-%m)"
+else
+    info "No schedule. Run by hand any time: $RUNNER"
+fi
+
 say "Done"
-info "Register this with your agent runner on a monthly schedule:"
-info "  $BRIEF"
+info "The runner checks hourly and stays silent until you message the bot."
+info "  $RUNNER            # run the review now, by hand"
+info "  $RUNNER --dry-run  # everything except writes and sends"
+info "  $BRIEF   # what the reviewer does"
 info ""
-info "It is written for an agent that can read files over SSH and run commands."
 info "Everything in it is read-only until you reply 'approve' over Signal."

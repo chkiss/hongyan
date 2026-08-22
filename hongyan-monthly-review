@@ -23,7 +23,6 @@ import sys
 import time
 import urllib.request
 
-SSH = os.environ.get("HONGYAN_SSH", "hetz.chkiss.com")
 STATE_DIR = os.path.expanduser("~/.config/hongyan")
 ZEN_BASE = "https://opencode.ai/zen/v1"
 CHAIN = ["x-preview-f-free", "big-pickle", "hy3-free"]
@@ -40,9 +39,31 @@ def _today():
 
 def ssh(cmd, timeout=30):
     r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o",
-                        "ConnectTimeout=10", SSH, cmd],
+                        "ConnectTimeout=10", _ssh_target(), cmd],
                        capture_output=True, text=True, timeout=timeout)
     return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _ssh_target():
+    """Where the reviewed server lives: HONGYAN_SSH, else review-target file.
+
+    No default host on purpose — a reviewer pointed at whatever box the
+    author used would audit the wrong server and look authoritative doing
+    it. install-review-host.sh writes the file at setup time.
+    """
+    t = os.environ.get("HONGYAN_SSH", "")
+    if t:
+        return t
+    f = os.path.join(STATE_DIR, "review-target")
+    try:
+        with open(f) as fh:
+            t = fh.read().strip()
+        if t:
+            return t
+    except OSError:
+        pass
+    sys.exit("hongyan-monthly-review: no SSH target configured.\n"
+             "Set HONGYAN_SSH or write the target to %s" % f)
 
 
 # --------------------------------------------------------------- triggers ---
