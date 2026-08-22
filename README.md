@@ -23,23 +23,26 @@ bot:  It's a Lego Technic 42096 Porsche 911 RSR, retired 2021, currently
 
 ## It costs nothing to run
 
-The whole thing runs on the free tier of [Nous Research's inference API](https://inference-api.nousresearch.com/v1) — the Hermes ecosystem — using an OpenAI-compatible endpoint and a static API key. Three models do different jobs:
+Everything runs through [OpenCode Zen](https://opencode.ai/zen) — an OpenAI-compatible gateway whose docs open it to *any* agent — on an ordered chain of free models. The first channel that answers wins; the rest are fallbacks:
 
-| Job | Model | Why |
-|---|---|---|
-| Routing and planning | `upstage/solar-pro4:free` | Fast, cheap to call repeatedly, reasoning disabled |
-| Answering | `tencent/hy3:free` | Strong reasoning; worth the extra latency |
-| Vision | `stepfun/step-3.7-flash:free` | The only free model here that accepts images |
+| Tier | Model | Context | Vision | Notes |
+|---|---|---|---|---|
+| Preferred | `x-preview-f-free` — Ox Alpha Free | 1M | yes | Strongest here, and its provider keeps nothing (zero-retention) |
+| Second | `big-pickle` | 200K | no | Stealth preview; its free period may train on traffic |
+| Fallback | `hy3-free` (Hermes tier) | 190K | no | Weakest of the three; same free-period caveat |
+| Vision fallback | `mimo-v2.5-free` | 200K | yes | Only reached if the preferred vision model is out |
 
-Any OpenAI-compatible endpoint works — set `api_base` and `key_file` in the config and name whichever models you like.
+Routing and answering share the text chain — with everything free there is no cost reason to route on a weaker model. The keyless free tier works today; a Zen API key (`key_file`) makes your usage attributable to an account instead of an IP address.
 
-Bring your own account and key. hongyan is a client, not a service: it never proxies anyone else’s access, and whichever provider you point it at, you are the one who has accepted their terms. Some providers restrict programmatic clients they did not publish themselves, so if you plan to run it against a free tier, it is worth a quick read of that provider’s acceptable-use section — and worth asking them, since a one-line written answer settles it.
+Bring your own account and terms. hongyan is a client, not a service: it never proxies anyone else's access. Zen's own terms permit use "for your own internal use" and with any agent, which is exactly what this is — one person's assistant making a handful of calls per message they sent. Free models carry rolling usage caps that reset within about a day; when a cap wall or a withdrawn model takes a channel down, hongyan treats it as a decision for you, not as noise:
 
-Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. hongyan notices from the failure itself — the next time a real message needs that model, it tells you the model looks gone and what the error was, once a day rather than on every attempt.
+- **Your answer comes first.** The next model in the chain serves the request immediately; triage happens only after the reply is in hand.
+- **Temporary failures** (overload, timeouts) earn the channel a two-minute cooldown and nothing else.
+- **Cap walls and gone-looking failures bench the channel indefinitely**, alert you at once, and queue an action item so the next digest raises it. Nothing quietly un-disables itself: `use <model>` puts a channel back after you have looked, `status` shows what is benched.
 
-That is deliberately not a scheduled check — see [It only acts when you tell it to](#it-only-acts-when-you-tell-it-to).
+That availability warning still comes from real failures rather than polling — see [It only acts when you tell it to](#it-only-acts-when-you-tell-it-to).
 
-It reports and never switches. Picking a replacement is a judgement call — a model can be excellent and still be wrong for the job, since one tuned for agentic coding is not necessarily the one you want answering questions about grammar — so it stays yours. The same reason no model is allowed to trigger an action.
+Free tiers rotate, though, and that failure is nastier than it sounds: a model that quietly leaves the free tier turns every answer into a 404 that reads like a broken API key. With chains, the first symptom is not silence but a slower answer from the fallback plus a message saying exactly which channel died and why.
 
 Free models are the interesting constraint, because the natural worry about pointing a language model at a real server is how much you are willing to trust it. **This design means you don't have to.** The safety of the system does not rest on the model being well-behaved, well-aligned, or even competent — which is exactly what makes free-tier models a practical choice rather than a compromise.
 
