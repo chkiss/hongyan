@@ -722,11 +722,13 @@ def t2_done(arg):
 
 
 def queue_digest():
-    """The daily nudge. Empty string when there is nothing to say.
+    """The digest text itself — what a 'yes' to the digest offer delivers.
 
     The queue was write-only in practice: nine items sat unread for a week,
     including two 'remind me to call the vet'. Capturing a reminder and never
-    mentioning it again is worse than refusing to take it.
+    mentioning it again is worse than refusing to take it. It used to be sent
+    on a schedule; now it is offered the next time you text, and only a reply
+    makes it go out.
     """
     pending = pending_items()
     if not pending:
@@ -735,6 +737,185 @@ def queue_digest():
     if not old:
         return ""
     return format_queue(pending, "still open from earlier — %d item(s):" % len(pending))
+
+
+# --------------------------------------------------------------------------
+# Offers — the pull-only delivery of anything periodic.
+#
+# Signal's terms forbid automated messaging, and this project's own rule is
+# stricter still: every message it sends must be downstream of one it received.
+# So nothing periodic is ever SENT on a timer. When the monthly review comes
+# due, or queue items have been waiting more than a day, the offer waits in a
+# local stamp file and rides along as a second text after your next answered
+# message. Only an explicit yes sends anything; no defers until the next cycle;
+# ignoring it goes quiet on its own.
+#
+# State lives in offers.json:
+#   review_offer  {"stamp": "YYYY-MM", "at": epoch, "outstanding": bool}
+#   digest_offer  {"stamp": "YYYY-MM-DD", "at": epoch, "outstanding": bool}
+#   last_review   "YYYY-MM" of the last review actually delivered
+#
+# The stamp records that this cycle was already raised — offered OR declined OR
+# ignored past its window all count, which is what makes "expire silently" work.
+# --------------------------------------------------------------------------
+
+OFFERS_FILE = os.path.join(STATE_DIR, "offers.json")
+REVIEW_OFFER_TTL = 86400       # how long a 'yes' stays answerable after the offer
+DIGEST_OFFER_TTL = 6 * 3600
+
+
+def load_offers():
+    try:
+        with open(OFFERS_FILE) as fh:
+            offers = json.load(fh)
+    except (OSError, ValueError):
+        offers = {}
+    return {
+        "review_offer": offers.get("review_offer") or {},
+        "digest_offer": offers.get("digest_offer") or {},
+        "last_review": offers.get("last_review") or "",
+    }
+
+
+def save_offers(offers):
+    tmp = OFFERS_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(offers, fh)
+    os.replace(tmp, OFFERS_FILE)
+
+
+def _month_now():
+    return _dt.date.today().strftime("%Y-%m")
+
+
+def _today_str():
+    return _dt.date.today().isoformat()
+
+
+def _muted():
+    try:
+        with open(MUTE_FILE) as fh:
+            return time.time() < float(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+
+
+def stale_pending_count():
+    pending = pending_items()
+    return len([p for p in pending if (time.time() - (p[1].get("ts") or 0)) > 86400])
+
+
+def oldest_stale_label():
+    pending = pending_items()
+    old = [i for _, i in pending if (time.time() - (i.get("ts") or 0)) > 86400]
+    return _age_label(min(i["ts"] for i in old)) if old else ""
+
+
+def nudge_due(offers=None):
+    """Which offer should ride along with the next answer, if any.
+
+    Review outranks the digest: at most one extra text per exchange, and a
+    month-old defect summary matters more than yesterday's notes. The digest
+    simply gets its own day.
+    """
+    offers = offers if offers is not None else load_offers()
+    if _muted():
+        return None
+    if (review_due(offers)):
+        return "review"
+    if stale_pending_count() and \
+            offers["digest_offer"].get("stamp") != _today_str():
+        return "digest"
+    return None
+
+
+def review_due(offers=None):
+    """A review for this month is owed AND not yet raised this cycle."""
+    offers = offers if offers is not None else load_offers()
+    if offers["last_review"] == _month_now():
+        return False
+    return offers["review_offer"].get("stamp") != _month_now()
+
+
+AFFIRM_RE = re.compile(
+    r"(?:yes|yep|yeah|yup|sure|ok|okay|k|go ahead|do it|run it|proceed|please do)",
+    re.I)
+DECLINE_RE = re.compile(
+    r"(?:no|nope|nah|not now|not yet|later|maybe later|skip it|skip|don'?t bother)",
+    re.I)
+
+
+def classify_reply(text):
+    """'affirm' | 'decline' | None for a bare conversational answer.
+
+    Matched against the WHOLE body, so 'yes but also check nginx' falls through
+    to normal handling rather than hijacking half a real message into consent.
+    """
+    t = re.sub(r"[^a-z'\s]", " ", str(text or "").lower())
+    t = " ".join(t.split())
+    if AFFIRM_RE.fullmatch(t):
+        return "affirm"
+    if DECLINE_RE.fullmatch(t):
+        return "decline"
+    return None
+
+
+REVIEW_RUN_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:run|do|perform|execute|start|send)\s+(?:the\s+|a\s+|your\s+|me\s+){0,2}"
+    r"(?:monthly\s+|self[- ]\s*)?(?:review|report)\b(?:\s+(?:now|please))?\s*[.!]?\s*$"
+    r"|^\s*(?:monthly\s+|self[- ]\s*)?(?:review|report)\s+(?:now|please)\s*[.!]?\s*$",
+    re.I)
+
+
+def outstanding_nudge(offers):
+    """An offer sent and still inside its answer window, else None.
+
+    The window exists because a bare 'yes' two days later might be answering
+    something else entirely; past it, the offer has expired silently anyway.
+    """
+    now = time.time()
+    for which, ttl in (("review", REVIEW_OFFER_TTL), ("digest", DIGEST_OFFER_TTL)):
+        rec = offers[which + "_offer"]
+        if rec.get("outstanding"):
+            fresh = now - (rec.get("at") or 0) <= ttl
+            if which == "digest":
+                fresh = fresh and rec.get("stamp") == _today_str()
+            if fresh:
+                return which
+            rec["outstanding"] = False  # expired silently
+    return None
+
+
+def nudge_text(which):
+    if which == "review":
+        return ("By the way — it's time for this box's monthly self-review "
+                "(model roster movement, defects logged). Reply 'yes' and I'll run "
+                "it, 'no' to skip this month.")
+    n = stale_pending_count()
+    return ("Also — %d thing(s) have been waiting since %s. Reply 'yes' and I'll "
+            "list them." % (n, oldest_stale_label() or "earlier"))
+
+
+def deliver_nudge(which):
+    """What a 'yes' to an offer sends back."""
+    offers = load_offers()
+    offers[which + "_offer"]["outstanding"] = False
+    if which == "digest":
+        save_offers(offers)
+        audit("digest_sent", "via yes")
+        return cmd_queue()
+    mode = CFG.get("monthly_review", "local")
+    if mode == "off":
+        save_offers(offers)
+        return "(the monthly review is switched off in config)"
+    if mode == "remote":
+        save_offers(offers)
+        return "(the monthly review runs on your other machine)"
+    report = monthly_review()
+    offers["last_review"] = _month_now()
+    save_offers(offers)
+    audit("review_run", "via yes")
+    return report
 
 
 def cmd_ip():
@@ -766,6 +947,27 @@ def cmd_about():
 def cmd_help():
     return "read-only: %s\nactions: %s\nor just ask a question in plain English." % (
         " ".join(sorted(T1)), " ".join(sorted(T2)))
+
+
+def cmd_review(_arg=None):
+    """Run the monthly self-review right now, on demand.
+
+    The deterministic path — 'review' typed exactly, or phrased as an obvious
+    request ('do the monthly review') — never needs an offer or a confirmation:
+    the user asked for it by name, which IS the permission.
+    """
+    mode = CFG.get("monthly_review", "local")
+    if mode == "off":
+        return "(the monthly review is switched off in config)"
+    if mode == "remote":
+        return "(the monthly review runs on your other machine)"
+    report = monthly_review()
+    offers = load_offers()
+    offers["last_review"] = _month_now()
+    offers["review_offer"]["outstanding"] = False
+    save_offers(offers)
+    audit("review_run", "via command")
+    return report
 
 
 def cmd_boot():
@@ -829,6 +1031,7 @@ T1 = {
     "ip": cmd_ip,
     "about": cmd_about,
     "help": cmd_help,
+    "review": cmd_review,
 }
 # Site-specific commands come from config and sit alongside the built-ins. They
 # cannot shadow one: a built-in losing its meaning because of a config typo
@@ -913,6 +1116,7 @@ SYNONYMS = {
     "ip": ["ip", "address", "hostname"],
     "about": ["about", "who are you", "what are you"],
     "help": ["help", "commands"],
+    "review": ["review", "monthly review", "monthly report", "self review"],
 }
 for _name, _spec in (CFG.get("custom_commands") or {}).items():
     if _name in T1 and _name not in SYNONYMS:
@@ -2155,10 +2359,11 @@ def queue_note(text):
                              "done": False}) + "\n")
     audit("queued_kind", kind)
     if kind == "reminder":
-        # Say when it will come back. "queued for Claude" gave no hint that
-        # anything would ever resurface, and nothing did.
-        return "noted — I'll put it in the morning summary until you clear it."
-    return "queued for Claude — nothing ran. It'll show up in the morning summary."
+        # Say what happens next. "queued for Claude" gave no hint that anything
+        # would ever resurface, and nothing did. Nothing arrives unasked: it
+        # comes back as an offer attached to a message you sent.
+        return "noted — I'll bring it up next time you message me until you clear it."
+    return "queued — nothing ran. Say 'queue' anytime, or I'll mention it next time we talk."
 
 
 def dispatch(text, notify=None, attachments=None, sources_out=None, forced_turn=None):
@@ -2517,6 +2722,20 @@ def main():
         seen["recent"].append(time.time())
         save_seen(seen)
 
+        # 5.6 An outstanding offer captures bare yes/no BEFORE anything else
+        #     sees them — route() would answer "yes to what?" and the moment
+        #     is gone. Quoted replies count too, since answering an offer by
+        #     quoting it is exactly what Signal invites. Anything longer than
+        #     a bare phrase falls through to normal handling.
+        offers = load_offers()
+        pending_nudge = outstanding_nudge(offers)
+        save_offers(offers)  # outstanding_nudge may have expired one silently
+        verdict = classify_reply(body) if (pending_nudge and not attachments) else None
+        explicit_review = bool(
+            not attachments and body.strip() and REVIEW_RUN_RE.match(body.strip()))
+        # This exchange already carries an offer outcome; it gets no second one.
+        offer_exchange = bool(verdict or explicit_review)
+
         # 6. Handle it, showing a typing indicator throughout. Signal expires
         #    typing after 15s, so refresh until the work finishes — a slow
         #    answer then reads as thinking rather than as a hang.
@@ -2560,7 +2779,23 @@ def main():
 
         used = []
         try:
-            reply = dispatch(body, notify, attachments, used, forced_turn=forced_turn)
+            if verdict == "affirm":
+                reply = deliver_nudge(pending_nudge)
+                used.append("server:review" if pending_nudge == "review"
+                            else "server:queue")
+            elif verdict == "decline":
+                offers[pending_nudge + "_offer"]["outstanding"] = False
+                save_offers(offers)
+                audit(pending_nudge + "_declined", clip(body))
+                reply = ("Okay — not this month." if pending_nudge == "review"
+                         else "Okay — say 'queue' whenever you want the list.")
+            elif explicit_review:
+                # Asked for by name: no offer, no confirmation needed.
+                reply = cmd_review()
+                used.append("server:review")
+            else:
+                reply = dispatch(body, notify, attachments, used,
+                                 forced_turn=forced_turn)
         except Exception as exc:  # noqa: BLE001 - never let one message kill the listener
             audit_fail("error", str(exc)[:200])
             reply = "handler error: %s" % str(exc)[:120]
@@ -2594,6 +2829,23 @@ def main():
             if attachments and body:
                 label = "%s [with %d image(s)]" % (body, len(attachments))
             save_turn(label, reply, used, reply_ts=notice_ts + reply_ts, user_ts=ts)
+
+            # Text 2. Whatever periodic thing is due rides along HERE — after
+            # an answer the user caused, never instead of one, and never on a
+            # schedule of its own. At most one per exchange: an exchange that
+            # already settled an offer gets no second. Only what the offer
+            # advertises is ever sent unasked; it goes out solely on a yes.
+            which = None if offer_exchange else nudge_due(load_offers())
+            if which:
+                client.send_message(CFG["owner_number"], nudge_text(which))
+                offers = load_offers()
+                offers[which + "_offer"] = {
+                    "stamp": _month_now() if which == "review" else _today_str(),
+                    "at": time.time(),
+                    "outstanding": True,
+                }
+                save_offers(offers)
+                audit(which + "_offered", "")
 
 
 if __name__ == "__main__":
