@@ -609,6 +609,127 @@ m._request_once = _real_once
 m.subprocess.run = _real_subproc
 
 
+# ------------------------------------------------------------------ soul -----
+section("soul.md stays true")
+
+# The doc is the model's self-knowledge; a stale line here becomes a confident
+# wrong answer there. Structure, not prose, is what the tests pin.
+text = m.soul_text()
+check("exists", bool(text), True)
+check("short enough to inject every answer", len(text) <= 4000, True)
+
+import re as _re
+import urllib.parse as _up
+
+urls = _re.findall(r"https?://\S+", text)
+check("has links at all", len(urls) >= 2, True)
+check("every link is https", all(u.startswith("https://") for u in urls), True)
+check("every link parses",
+      all(_up.urlparse(u).netloc and "." in _up.urlparse(u).netloc for u in urls), True)
+
+backticked = set(_re.findall(r"`([a-z]+)`", text))
+stray = backticked - set(m.T1) - set(m.T2) - {"all"}
+check("every command it mentions is real", stray, set())
+
+block = m.soul_block()
+check("injected block wraps the doc", text[:40] in block, True)
+
+_real_soul_path = m.SOUL_PATH
+m.SOUL_PATH = "/nonexistent/soul.md"
+check("missing doc degrades quietly", (m.soul_text(), m.soul_block()), ("", ""))
+m.SOUL_PATH = _real_soul_path
+
+
+# ------------------------------------------------------------ soul gate ------
+section("soul is injected only for meta-questions")
+
+# Two free signals, unioned: a local regex and the router's verdict riding
+# along in its existing JSON. Neither may cost an extra model call.
+for text in ("who are you?", "who made you?", "what's your name",
+             "where does your source code live?", "are you open source?",
+             "how do you work?", "hongyan ne demek?", "what can't you do?",
+             "who built this thing?"):
+    check("meta: %r" % text, m._looks_meta(text), True)
+for text in ("what's the weather in tokyo", "check disk space",
+             "is nginx running?", "who won the match last night",
+             "remind me to call the vet"):
+    check("ordinary: %r" % text, m._looks_meta(text), False)
+
+# The router's vote rides in its JSON; parse it out.
+_captured = {}
+_real_mc = m.model_call
+_real_route = m.route
+_real_gather = m.gather
+
+
+def fake_route_model(model, messages, max_tokens=None):
+    _captured["prompt"] = messages[0]["content"]
+    return '{"mode":"new","turns":[],"standalone":"x","meta":true}'
+
+
+m.model_call = fake_route_model
+turns, standalone, meta = m.route("anything")
+check("router verdict surfaces as third return", meta, True)
+check("routing contract mentions the meta field",
+      '"meta":false' in _captured.get("prompt", ""), True)
+
+
+def route_no_meta(t):
+    return [], t, False
+
+
+def route_meta(t):
+    return [], t, True
+
+
+# ------------------------------------------------- end-to-end injection ------
+section("soul injection end-to-end")
+
+captured_systems = []
+
+
+def capture_answer_model(role, messages, max_tokens=None):
+    captured_systems.append(messages[0]["content"])
+    return "a short reply"
+
+
+def gather_stub(*a, **k):
+    return [], False
+
+
+m.model_call = capture_answer_model
+m.gather = gather_stub
+
+m.route = route_no_meta
+m.answer("who are you?")
+check("regex alone injects", any("WHO YOU ARE" in s for s in captured_systems), True)
+
+captured_systems.clear()
+m.answer("what's the weather in tokyo")
+check("ordinary question stays lean",
+      all("WHO YOU ARE" not in s for s in captured_systems), True)
+
+captured_systems.clear()
+m.route = route_meta
+m.answer("some oddly phrased self question the regex never saw coming")
+check("router vote alone injects",
+      any("WHO YOU ARE" in s for s in captured_systems), True)
+
+captured_systems.clear()
+_real_meta_re = m._META_RE
+m._META_RE = _re.compile(r"never-matches-anything")
+m.route = route_no_meta
+m.answer("who are you?")
+check("both signals silent means no doc",
+      all("WHO YOU ARE" not in s for s in captured_systems), True)
+
+# restore everything the section touched
+m._META_RE = _real_meta_re
+m.model_call = _real_mc
+m.route = _real_route
+m.gather = _real_gather
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

@@ -392,15 +392,21 @@ def resolve_quote(quote):
 
 
 def route(text):
-    """Resolve the message: which past turns matter, and a standalone rewrite.
+    """Resolve the message: which past turns matter, a standalone rewrite,
+    and whether the message is about the assistant itself.
 
     Separated from planning on purpose: a new question should not inherit a
     stale thread's context, and a follow-up is useless without it. This call
     only routes — it never answers.
+
+    The meta verdict rides along in the JSON this call already makes; it
+    costs no extra round trip. It is advisory only — the caller unions it
+    with the local regex, because this function skips its model entirely on
+    an empty history and a failed parse loses every field at once.
     """
     turns = load_history()
     if not turns:
-        return [], text
+        return [], text, None
 
     recent = turns[-12:]
     catalog = "\n".join(
@@ -415,12 +421,15 @@ def route(text):
                  "You route an incoming message. Decide whether it continues an earlier "
                  "exchange or starts a new topic. Do NOT answer it.\n"
                  'Reply with ONLY JSON: '
-                 '{"mode":"new|followup","turns":[],"standalone":"..."}\n'
+                 '{"mode":"new|followup","turns":[],"standalone":"...","meta":false}\n'
                  "turns = indexes of earlier exchanges needed to understand the message "
                  "(empty for a new topic; usually 1-3 for a follow-up).\n"
                  "A message is a follow-up if it uses pronouns like that/it/those, refers "
                  "to a previous answer, or is a bare refinement such as 'and the second "
                  "one?' or 'in celsius'.\n"
+                 '"meta" is true ONLY if the message is about the assistant itself — what '
+                 "it is, who made it, its source code, how it works — rather than about "
+                 "the world or the server.\n"
                  'Also include "standalone": rewrite the message as a complete, '
                  "self-contained question that names its subject explicitly (for a new "
                  "topic, just repeat the message). This is what gets looked up, so a bare "
@@ -430,10 +439,10 @@ def route(text):
         ],
     )
     if not out:
-        return [], text
+        return [], text, None
     obj = parse_json_object(out)
     if obj is None:
-        return [], text
+        return [], text, None
 
     # The standalone rewrite is what gets looked up. Without it a bare "what
     # weekdays?" reaches the loop with an earlier answer in view, and the model
@@ -441,10 +450,11 @@ def route(text):
     standalone = obj.get("standalone")
     standalone = standalone.strip()[:300] if isinstance(standalone, str) and standalone.strip() else text
 
+    meta = obj.get("meta") is True
     if obj.get("mode") != "followup":
-        return [], standalone
+        return [], standalone, meta
     idxs = [i for i in (obj.get("turns") or []) if isinstance(i, int) and 0 <= i < len(recent)]
-    return [recent[i] for i in idxs[:3]], standalone
+    return [recent[i] for i in idxs[:3]], standalone, meta
 
 
 def rewrite_against(turn, text):
@@ -2278,6 +2288,54 @@ IDENTITY = (
 )
 
 
+def soul_text():
+    """The owner-editable self-description, or "" when absent.
+
+    Static identity only, by rule: model ids, host labels and command lists
+    are computed live by `about`, and a second copy here would be the copy
+    that lies first. Tests pin the structure (links valid, commands real) so
+    drift fails loudly instead of teaching the model stale facts.
+    """
+    try:
+        with open(SOUL_PATH) as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def soul_block():
+    text = soul_text()
+    if not text:
+        return ""
+    return ("\n\nWHO YOU ARE — authoritative when the question is about you:\n%s\n"
+            % text)
+
+
+SOUL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soul.md")
+
+# Meta-questions get the soul doc injected; everything else answers lean.
+# Two independent signals, because each has a documented blind spot and both
+# are free: the regex is instant and deterministic but misses paraphrases,
+# while the router's verdict rides along in its existing JSON — except that
+# route() skips the model entirely on an empty history, and a failed parse
+# loses the field. Either signal firing is enough; neither costs a call.
+_META_RE = re.compile(
+    r"\b(who|what)\s+(are|r)\s+(you|u)\b"
+    r"|\bwhat'?s your name\b|\byour name\b"
+    r"|\b(who|what)\s+(made|built|created|designed|wrote|named)\s+(you|u|this)\b"
+    r"|\bhow\s+(do|does|did|were|are)\s+(you|u|it|this)\s+"
+    r"(work|works|built|made|run|runs|set ?up|configured?)\b"
+    r"|\byour\s+(source|code|repos?\b|repository|github|docs?|soul)"
+    r"|\bopen[- ]?source\b|\bgithub\.com\b|\bgit\s+repo"
+    r"|\bhong(yan|yu)\b"
+    r"|\bwhat\s+(can|cannot|can't)\s+(you|u|it)\s+(do|not do)\b",
+    re.I)
+
+
+def _looks_meta(*texts):
+    return any(_META_RE.search(t or "") for t in texts)
+
+
 def plain_text(text):
     """Strip markdown. Models emit it despite instructions, and Signal shows it raw."""
     if not text:
@@ -2529,8 +2587,14 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     # no say in which turn is used.
     if forced_turn is not None:
         turns, standalone = [forced_turn], rewrite_against(forced_turn, text)
+        routed_meta = None
     else:
-        turns, standalone = route(text)
+        turns, standalone, routed_meta = route(text)
+    # Either signal is enough: the regex covers route()'s blind spots (empty
+    # history skips its model; a failed parse loses the flag), and the router
+    # covers phrasings the regex never anticipated. A false positive costs a
+    # few hundred tokens once; a false negative teaches the model to invent.
+    inject_soul = bool(routed_meta) or _looks_meta(text, standalone)
     if image_desc and image_desc.strip():
         standalone = "%s — image shows: %s" % (text.strip(), image_desc[:200])
     prior = render_turns(turns)
@@ -2574,6 +2638,7 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
 
     system = (
         IDENTITY +
+        (soul_block() if inject_soul else "") +
         "Answer in plain text, no markdown, at most 3 sentences unless the question truly "
         "needs more.\n"
         "Answer from the context below when it is relevant, otherwise from your own "
