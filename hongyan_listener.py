@@ -109,7 +109,11 @@ def clip(text, limit=AUDIT_DETAIL):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+_audit_writes = 0
+
+
 def audit(kind, detail=""):
+    global _audit_writes
     # The audit log is TSV and is parsed by the monthly review. A message
     # containing a newline used to split into extra rows whose first field was
     # message text, so `cut -f2 | sort | uniq -c` reported event types called
@@ -122,7 +126,12 @@ def audit(kind, detail=""):
                              flat(kind), flat(detail))
     with open(AUDIT_FILE, "a") as fh:
         fh.write(line)
-    trim(AUDIT_FILE, 2000, 800, archive=AUDIT_FILE + ".1")
+    # trim() re-reads the whole file; running it on every event made each log
+    # line O(n). Throttle it — the cap still holds, just checked in batches.
+    _audit_writes += 1
+    if _audit_writes >= 64:
+        _audit_writes = 0
+        trim(AUDIT_FILE, 2000, 800, archive=AUDIT_FILE + ".1")
 
 
 def audit_fail(kind, detail=""):
@@ -294,6 +303,31 @@ def _norm(text):
     return " ".join(str(text or "").split()).strip().lower()
 
 
+_JSON_DECODER = json.JSONDecoder()
+
+
+def parse_json_object(text):
+    """First JSON object in model output, or None.
+
+    route() matched greedily and decide() non-greedily, so each failed on a
+    different shape of prose-wrapped output: greedy swallowed trailing prose
+    containing braces, non-greedy stopped at the first brace inside a string
+    value. raw_decode from each '{' handles both, and rejects arrays.
+    """
+    if not text:
+        return None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = _JSON_DECODER.raw_decode(text[i:])
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
 def _similar(a, b, threshold=0.8):
     """Token-set overlap, for spotting a step that repeats an earlier one."""
     ta = set(re.findall(r"\w+", a))
@@ -397,12 +431,8 @@ def route(text):
     )
     if not out:
         return [], text
-    m = re.search(r"\{.*\}", out, re.S)
-    if not m:
-        return [], text
-    try:
-        obj = json.loads(m.group(0))
-    except ValueError:
+    obj = parse_json_object(out)
+    if obj is None:
         return [], text
 
     # The standalone rewrite is what gets looked up. Without it a bare "what
@@ -441,12 +471,8 @@ def rewrite_against(turn, text):
     )
     if not out:
         return text
-    m = re.search(r"\{.*\}", out, re.S)
-    if not m:
-        return text
-    try:
-        obj = json.loads(m.group(0))
-    except ValueError:
+    obj = parse_json_object(out)
+    if obj is None:
         return text
     val = obj.get("standalone")
     return val.strip()[:300] if isinstance(val, str) and val.strip() else text
@@ -1016,7 +1042,7 @@ def attachment_path(att):
     image looked like "no image was attached". Try every key, and glob for the
     extension signal-cli appends from the content type.
     """
-    d = CFG["attachment_dir"]
+    d = os.path.expanduser(CFG["attachment_dir"])
     for key in ("id", "filename", "fileName"):
         name = att.get(key)
         if not name:
@@ -1038,13 +1064,14 @@ def describe_image(text, attachments):
     if not vision:
         return "", "no model_vision configured in config.json"
     descriptions = []
+    skipped = []
     for att in attachments:
         ctype = (att.get("contentType") or "").lower()
         if ctype and not ctype.startswith("image/"):
-            # The vision model takes images. Base64-ing a PDF or a voice note
-            # into it wastes a call and returns nonsense.
-            return "", ("you sent a %s attachment — I can only look at images."
-                        % (ctype or "non-image"))
+            # Skip, don't fail. A photo plus a PDF used to error the whole
+            # message — the photo went undescribed because of its sibling.
+            skipped.append(ctype)
+            continue
         path = attachment_path(att)
         if not path:
             audit_fail("attach_missing", json.dumps(sorted(att.keys()))[:60])
@@ -1076,12 +1103,19 @@ def describe_image(text, attachments):
             return "", "vision model %s returned no content — I can still answer from your message alone." % vision
         descriptions.append(desc.strip())
     if not descriptions:
+        if skipped:
+            return "", ("you sent a %s attachment — I can only look at images."
+                        % (skipped[0] or "non-image"))
         # Never fall through as "no error, no description" — that is what made
         # the failure invisible: the caller treated it as "there was no image".
         return "", "I received the attachment but could not read it."
     if len(descriptions) == 1:
-        return descriptions[0], None
-    joined = "\n".join("[image %d] %s" % (i + 1, d) for i, d in enumerate(descriptions))
+        joined = descriptions[0]
+    else:
+        joined = "\n".join("[image %d] %s" % (i + 1, d) for i, d in enumerate(descriptions))
+    if skipped:
+        joined += "\n(%s attachment not looked at — I can only look at images.)" \
+            % ", ".join(sorted(set(skipped)))
     return joined, None
 
 
@@ -1845,14 +1879,10 @@ def decide(text, prior, image_desc, steps, challenged, _retry=True):
     )
     if not out:
         return _decide_retry(text, prior, image_desc, steps, challenged, _retry, "empty", "")
-    m = re.search(r"\{.*?\}", out, re.S)
-    if not m:
-        return _decide_retry(text, prior, image_desc, steps, challenged, _retry, "no_json", out)
-    try:
-        obj = json.loads(m.group(0))
-    except ValueError:
+    obj = parse_json_object(out)
+    if obj is None:
         return _decide_retry(text, prior, image_desc, steps, challenged, _retry,
-                             "bad_json", m.group(0))
+                             "no_json", out)
 
     action = obj.get("action")
     if action == "search":
@@ -2397,7 +2427,8 @@ def main():
     seen = load_seen()
 
     for raw in client.lines():
-        open(HEARTBEAT, "w").write(str(time.time()))
+        with open(HEARTBEAT, "w") as fh:
+            fh.write(str(time.time()))
         try:
             msg = json.loads(raw)
         except ValueError:
@@ -2566,26 +2597,24 @@ def main():
 
 
 if __name__ == "__main__":
-    # `--digest` prints the pending-queue nudge and exits; the daily watchdog
-    # sends whatever it prints. Kept as a print rather than a send so the
-    # scheduling stays in cron where the rest of it already lives, and so it
-    # can be inspected by hand without messaging anyone.
-    if len(sys.argv) > 1 and sys.argv[1] == "--digest":
-        text = queue_digest()
-        if text:
-            print(text)
-        sys.exit(0)
-
-    # Same contract as --digest: print something only when there is something
-    # to say, and let the watchdog decide how to deliver it.
-    if len(sys.argv) > 1 and sys.argv[1] == "--check-models":
-        text = check_models()
-        if text:
-            print(text)
-        sys.exit(0)
-
-    if len(sys.argv) > 1 and sys.argv[1] == "--monthly":
-        text = monthly_review()
+    # `--digest`, `--check-models` and `--monthly` print their report and exit;
+    # the watchdog decides how to deliver it. Kept as prints rather than sends
+    # so scheduling stays in cron where the rest of it already lives, and so
+    # each can be inspected by hand without messaging anyone.
+    FLAGS = {
+        "--digest": queue_digest,
+        "--check-models": check_models,
+        "--monthly": monthly_review,
+    }
+    if len(sys.argv) > 1:
+        flag = sys.argv[1]
+        if flag not in FLAGS:
+            # A typo used to fall through to main() and connect as a daemon.
+            print("hongyan_listener: unknown argument %r — expected one of %s "
+                  "or no arguments" % (flag, ", ".join(sorted(FLAGS))),
+                  file=sys.stderr)
+            sys.exit(2)
+        text = FLAGS[flag]()
         if text:
             print(text)
         sys.exit(0)
