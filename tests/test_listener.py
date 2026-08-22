@@ -629,7 +629,8 @@ check("item says it self-recovers", "auto-recovers" in actions[0]["text"], True)
 
 # A genuinely gone model is the case that waits for a human: indefinite
 # bench, immediate alert, remedy named.
-os.remove(m.MODEL_GONE_FILE)
+if os.path.exists(m.MODEL_GONE_FILE):
+    os.remove(m.MODEL_GONE_FILE)
 
 
 def gone_then_ok(model, messages, max_tokens=None):
@@ -650,7 +651,8 @@ check("alert names the remedy", "use big-pickle" in alerts[0], True)
 # A benched channel is skipped on later calls, so the duplicate-item guard is
 # exercised by raising again directly.
 m.raise_action_item("x-preview-f-free", "still failing later")
-actions = [i for _, i in m.pending_items() if i.get("kind") == "action"]
+actions = [i for _, i in m.pending_items()
+           if i.get("kind") == "action" and i.get("model") == "x-preview-f-free"]
 check("repeat failure adds no second chore", len(actions), 1)
 
 digest = m.queue_digest()
@@ -668,7 +670,9 @@ check("restored after probe succeeded",
       reply.startswith("restored x-preview-f-free — back in service"), True)
 check("bench cleared", m._usable("x-preview-f-free"), True)
 check("matching action item closed",
-      all(i.get("kind") != "action" for i in m.load_queue() if not i.get("done")), True)
+      all(i.get("done") for i in m.load_queue()
+          if i.get("kind") == "action" and i.get("model") == "x-preview-f-free"),
+      True)
 check("unknown model refused", m.t2_use("not-a-model").startswith("refused"), True)
 m._request_once = _real_once
 m.subprocess.run = _real_subproc
