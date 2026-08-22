@@ -2374,7 +2374,9 @@ def main():
             continue
 
         # 1. Authentication. Everything else is dropped without parsing content.
-        if source != CFG["owner_aci"]:
+        #    Case-insensitive: a UUID typed with capitals into the config must
+        #    not become a bot that ignores its owner in silence.
+        if str(source or "").lower() != str(CFG["owner_aci"]).lower():
             audit("rejected", "aci=%s" % source[:8])
             continue
 

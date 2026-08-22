@@ -166,6 +166,10 @@ write_config() {
 
     owner_aci="$(ask_valid 'Your ACI (the owner, allowed to command it)' "$uuid_re" \
         'That is not a UUID. It looks like 3f2504e0-4f89-11d3-9a0c-0305e82c3301.')"
+    # Signal reports the ACI lowercase and the listener compares it as an exact
+    # string. Storing what the user typed (one capital letter) would mean a bot
+    # that silently ignores its owner forever.
+    owner_aci="$(printf '%s' "$owner_aci" | tr '[:upper:]' '[:lower:]')"
     owner_number="$(ask_valid 'Your phone number' "$e164_re" \
         'Needs the country code and no spaces, e.g. +15550000001.')"
 
