@@ -222,16 +222,23 @@ write_config() {
             warn "One number means it would be messaging its own account." >&2
         done
     fi
-    api_base="$(ask 'API base URL' 'https://inference-api.nousresearch.com/v1')"
+    api_base="$(ask 'API base URL' 'https://opencode.ai/zen/v1')"
+    key=""
     while true; do
-        key="$(ask 'API key (stored mode 600, never committed)')"
+        key="$(ask 'API key (optional for free tiers — Enter to skip)')"
         [ -n "$key" ] && break
-        warn "An API key is required; without it every answer fails." >&2
+        if confirm "No API key — continue without one?"; then
+            break
+        fi
     done
 
-    printf '%s' "$key" > "$STATE/nous.key"
-    chmod 600 "$STATE/nous.key"
-    ok "wrote $STATE/nous.key (mode 600)"
+    if [ -n "$key" ]; then
+        printf '%s' "$key" > "$STATE/zen.key"
+        chmod 600 "$STATE/zen.key"
+        ok "wrote $STATE/zen.key (mode 600)"
+    else
+        ok "no key stored — the listener calls the endpoint keyless"
+    fi
 
     python3 - "$REPO/config.example.json" "$CONFIG" \
              "$owner_aci" "$owner_number" "$bot_number" "$api_base" \
@@ -239,14 +246,14 @@ write_config() {
 import json, sys
 example, target, aci, owner, bot, api, state, review, transport = sys.argv[1:10]
 cfg = json.load(open(example))
-cfg["owner_aci"] = aci
-cfg["owner_number"] = owner
-cfg["bot_number"] = bot
-cfg["api_base"] = api
-cfg["socket"] = state + "/socket"
-cfg["key_file"] = state + "/nous.key"
-cfg["monthly_review"] = review
-cfg["transport"] = transport
+    cfg["owner_aci"] = aci
+    cfg["owner_number"] = owner
+    cfg["bot_number"] = bot
+    cfg["api_base"] = api
+    cfg["socket"] = state + "/socket"
+    cfg["key_file"] = state + "/zen.key"
+    cfg["monthly_review"] = review
+    cfg["transport"] = transport
 json.dump(cfg, open(target, "w"), indent=2, ensure_ascii=False)
 PY
     chmod 600 "$CONFIG"

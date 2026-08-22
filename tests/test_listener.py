@@ -449,6 +449,166 @@ check("remote points elsewhere", m.cmd_review(),
 m.CFG["monthly_review"] = _orig_mode if _orig_mode is not None else "local"
 
 
+# ------------------------------------------------------------------ chains ---
+section("model chains")
+
+# The shipped config prefers Ox Alpha Free everywhere it can serve, then Big
+# Pickle, then the Hermes tier; vision needs image-capable models.
+check("routing chain order", m.chain_for("routing"),
+      ["x-preview-f-free", "big-pickle", "hy3-free"])
+check("answering shares the text chain", m.chain_for("answering"),
+      ["x-preview-f-free", "big-pickle", "hy3-free"])
+check("vision chain is image-capable models", m.chain_for("vision"),
+      ["x-preview-f-free", "mimo-v2.5-free"])
+
+# A pre-chain config keeps working after an upgrade: answer model first,
+# then the old router, then the old dedicated vision model.
+_orig_cfg = dict(m.CFG)
+for k in ("text_chain", "vision_chain"):
+    m.CFG.pop(k, None)
+m.CFG["model_answer"] = "a/answer"
+m.CFG["model_classify"] = "b/classify"
+m.CFG["model_vision"] = "c/vision"
+legacy = m._build_chains()
+check("legacy text chain, answer first",
+      legacy["answering"], ["a/answer", "b/classify"])
+check("legacy routing follows text", legacy["routing"], ["a/answer", "b/classify"])
+check("legacy vision chain", legacy["vision"], ["c/vision"])
+m.CFG.clear()
+m.CFG.update(_orig_cfg)
+
+roles = set(m.configured_models()["x-preview-f-free"].split("+"))
+check("one id serving several roles is reported so", roles,
+      {"routing", "answering", "vision"})
+
+
+# ----------------------------------------------------------- classification ---
+section("failure triage")
+
+check("timeout is temporary",
+      m.classify_failure("<urlopen error timed out>"), "temporary")
+check("overload is temporary",
+      m.classify_failure("HTTP Error 503: Service Unavailable"), "temporary")
+check("rate limit is temporary",
+      m.classify_failure("HTTP Error 429: Too Many Requests"), "temporary")
+check("cap wall wants a human",
+      m.classify_failure('402 {"error":{"message":"Free usage exceeded, add credits"}}'),
+      "review")
+check("withdrawn model wants a human",
+      m.classify_failure("HTTP Error 404: Not Found — no such model"), "review")
+check("bad key wants a human",
+      m.classify_failure("HTTP Error 401: Unauthorized invalid api key"), "review")
+# Disabling a channel on evidence we do not understand would be worse than
+# retrying, so unknown errors stay temporary.
+check("unknown error stays temporary", m.classify_failure("something odd"), "temporary")
+
+
+# ------------------------------------------------------------ bench windows ---
+section("bench windows")
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+
+m.bench_model("temp/model", "overloaded", seconds=m.TEMP_COOLDOWN_SECONDS)
+rec = m._load_model_state()["temp/model"]
+check("temporary bench has a deadline",
+      rec["until"] is not None and rec["until"] > time.time(), True)
+check("temporary bench is short", rec["until"] - time.time() <= m.TEMP_COOLDOWN_SECONDS + 5, True)
+state = m._load_model_state()
+state["temp/model"]["until"] = time.time() - 1
+m.save_offers  # noqa: touch nothing; write state directly below
+with open(m.MODEL_STATE_FILE, "w") as fh:
+    json.dump(state, fh)
+check("expired cooldown frees the channel", m._usable("temp/model"), True)
+
+m.bench_model("gone/model", "404 no such model", seconds=None)
+check("indefinite bench blocks the channel", m._usable("gone/model"), False)
+
+
+# ------------------------------------------------- answer-first failover ------
+section("fallback answers before triage acts")
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+_real_once = m._request_once
+events = []
+
+
+def overload_then_ok(model, messages, max_tokens=None):
+    events.append(model)
+    if model == "x-preview-f-free":
+        return None, "gateway overloaded"
+    return "fallback says hi", None
+
+
+m._request_once = overload_then_ok
+out = m.model_call("routing", [{"role": "user", "content": "hi"}])
+m._request_once = _real_once
+check("the user got their answer", out, "fallback says hi")
+check("chain walked in order", events,
+      ["x-preview-f-free", "big-pickle"])
+rec = m._load_model_state().get("x-preview-f-free") or {}
+check("overload earned only a cooldown",
+      rec.get("until") is not None and rec.get("until", 0) > time.time(), True)
+check("no action item for a transient blip",
+      all(i.get("kind") != "action" for i in m.load_queue()), True)
+
+
+# ------------------------------------------------ dead channel, human needed --
+section("a dead channel benches until the user looks")
+
+_real_subproc = m.subprocess.run
+open(m.QUEUE_FILE, "w").close()
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+os.path.exists(m.MODEL_GONE_FILE) and os.remove(m.MODEL_GONE_FILE)
+alerts = []
+m.subprocess.run = lambda *a, **k: alerts.append(a[0][-1]) or type(
+    "R", (), {"returncode": 0})()
+
+
+def capped_then_ok(model, messages, max_tokens=None):
+    if model == "x-preview-f-free":
+        return None, ('402 {"error":{"message":"Free usage exceeded, '
+                      'add credits https://opencode.ai/zen"}}')
+    return "saved by big-pickle", None
+
+
+m._request_once = capped_then_ok
+out = m.model_call("routing", [{"role": "user", "content": "hi"}])
+m._request_once = _real_once
+check("fallback still answered", out, "saved by big-pickle")
+check("channel benched indefinitely",
+      m._load_model_state().get("x-preview-f-free", {}).get("until"), None)
+check("alert went out immediately", len(alerts), 1)
+check("alert names the remedy", "use x-preview-f-free" in alerts[0], True)
+actions = [i for _, i in m.pending_items() if i.get("kind") == "action"]
+check("exactly one action item queued", len(actions), 1)
+
+# A benched channel is skipped on later calls, so the duplicate-item guard is
+# exercised by raising again directly.
+m.raise_action_item("x-preview-f-free", "still failing later")
+actions = [i for _, i in m.pending_items() if i.get("kind") == "action"]
+check("repeat failure adds no second chore", len(actions), 1)
+
+digest = m.queue_digest()
+check("fresh action item surfaces in the digest at once",
+      ("needs a decision" in digest and "x-preview-f-free" in digest), True)
+
+
+# ------------------------------------------------------------------ restore ---
+section("'use' puts a channel back")
+
+m._request_once = lambda mdl, msgs, max_tokens=None: (
+    ("OK", None) if mdl == "x-preview-f-free" else (None, "nope"))
+reply = m.t2_use("x-preview-f-free")
+check("restored after probe succeeded",
+      reply.startswith("restored x-preview-f-free — back in service"), True)
+check("bench cleared", m._usable("x-preview-f-free"), True)
+check("matching action item closed",
+      all(i.get("kind") != "action" for i in m.load_queue() if not i.get("done")), True)
+check("unknown model refused", m.t2_use("not-a-model").startswith("refused"), True)
+m._request_once = _real_once
+m.subprocess.run = _real_subproc
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

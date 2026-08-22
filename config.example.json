@@ -13,12 +13,19 @@
   "burst_window_seconds": 60,
   "cooldown_seconds": 300,
   "cooldown_max_seconds": 1800,
-  "_model_note": "Any OpenAI-compatible endpoint. These are free-tier models; set key_file to a file containing the API key, mode 600.",
-  "api_base": "https://inference-api.nousresearch.com/v1",
-  "key_file": "~/.config/hongyan/nous.key",
-  "model_classify": "upstage/solar-pro4:free",
-  "model_answer": "tencent/hy3:free",
-  "model_vision": "stepfun/step-3.7-flash:free",
+  "_model_note": "OpenCode Zen (https://opencode.ai/zen) — an OpenAI-compatible gateway the docs open to any agent. The free tier works keyless today; set key_file to a Zen API key (mode 600) to make usage attributable to an account instead of an IP address.",
+  "api_base": "https://opencode.ai/zen/v1",
+  "key_file": "~/.config/hongyan/zen.key",
+  "_chain_note": "Ordered fallbacks; the first channel that answers wins. Text: Ox Alpha Free (strongest, zero-retention provider) -> Big Pickle (stealth preview; free period may train on traffic) -> Hy3 (Hermes tier). Vision needs image-capable models: Ox Alpha again, MiMo V2.5 behind it. A channel failing with gone/credit-wall errors is benched until YOU look at it — you get an alert and a queue action item, the fallback answers meanwhile, and 'use <model>' puts it back. Temporary failures (overload, timeouts) only earn a two-minute cooldown.",
+  "text_chain": [
+    "x-preview-f-free",
+    "big-pickle",
+    "hy3-free"
+  ],
+  "vision_chain": [
+    "x-preview-f-free",
+    "mimo-v2.5-free"
+  ],
   "attachment_dir": "~/.local/share/signal-cli/attachments",
   "max_image_bytes": 8000000,
   "_timeout_note": "Generous on purpose. A typing indicator runs while the model works, so a slow answer looks like thinking rather than a hang. Short timeouts silently queued real questions. Never set a max_tokens: reasoning models emit reasoning before content, and any cap risks an empty reply.",

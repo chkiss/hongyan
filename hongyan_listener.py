@@ -408,7 +408,7 @@ def route(text):
         for i, t in enumerate(recent))
 
     out = model_call(
-        CFG["model_classify"],
+        "routing",
         [
             {"role": "system",
              "content":
@@ -456,7 +456,7 @@ def rewrite_against(turn, text):
     plural of <that word>?" or the agent loop searches for nothing useful.
     """
     out = model_call(
-        CFG["model_classify"],
+        "routing",
         [
             {"role": "system",
              "content":
@@ -574,7 +574,14 @@ def cmd_status():
     disk = sh("df -h / | awk 'NR==2{print $5\" used, \"$4\" free\"}'", 10)
     mem = sh("free -h | awk 'NR==2{print $7\" available of \"$2}'", 10)
     failed = sh("systemctl --failed --no-legend --plain 2>/dev/null | wc -l", 10)
-    return "hetz %s\nload %s\ndisk %s\nmem %s\nfailed units: %s" % (up, load, disk, mem, failed)
+    out = "hetz %s\nload %s\ndisk %s\nmem %s\nfailed units: %s" % (
+        up, load, disk, mem, failed)
+    benched = [(m, r.get("why", "")) for m, r in _load_model_state().items()
+               if not _usable(m)]
+    if benched:
+        out += "\nbenched channels: %s" % "; ".join(
+            "%s (%s)" % (m, clip(w, 60)) for m, w in benched)
+    return out
 
 
 def cmd_disk():
@@ -659,13 +666,16 @@ def _age_label(ts):
 def format_queue(pending, header):
     """Render pending items, numbered so they can be cleared by number.
 
-    Reminders first: a forgotten reminder is a broken promise, an unanswered
-    note is only a loose end.
+    Order is urgency: action items (a benched model wanting a human) first,
+    then reminders — a forgotten reminder is a broken promise — then notes.
     """
+    actions = [(n, i) for n, i in pending if i.get("kind") == "action"]
     reminders = [(n, i) for n, i in pending if i.get("kind") == "reminder"]
-    notes = [(n, i) for n, i in pending if i.get("kind") != "reminder"]
+    notes = [(n, i) for n, i in pending
+             if i.get("kind") not in ("reminder", "action")]
     lines = [header]
-    for label, group in (("reminders", reminders), ("notes", notes)):
+    for label, group in (("needs a decision", actions),
+                         ("reminders", reminders), ("notes", notes)):
         if not group:
             continue
         lines.append("")
@@ -733,8 +743,8 @@ def queue_digest():
     pending = pending_items()
     if not pending:
         return ""
-    old = [p for p in pending if (time.time() - (p[1].get("ts") or 0)) > 86400]
-    if not old:
+    waiting = [p for p in pending if _is_waiting(p[1])]
+    if not waiting:
         return ""
     return format_queue(pending, "still open from earlier — %d item(s):" % len(pending))
 
@@ -800,14 +810,22 @@ def _muted():
         return False
 
 
+def _is_waiting(item):
+    """An item the digest should raise. Action items count at once — a benched
+    model is a decision the user is waiting on, not something to age 24h."""
+    if item.get("kind") == "action":
+        return True
+    return (time.time() - (item.get("ts") or 0)) > 86400
+
+
 def stale_pending_count():
     pending = pending_items()
-    return len([p for p in pending if (time.time() - (p[1].get("ts") or 0)) > 86400])
+    return len([p for p in pending if _is_waiting(p[1])])
 
 
 def oldest_stale_label():
     pending = pending_items()
-    old = [i for _, i in pending if (time.time() - (i.get("ts") or 0)) > 86400]
+    old = [i for _, i in pending if _is_waiting(i)]
     return _age_label(min(i["ts"] for i in old)) if old else ""
 
 
@@ -931,13 +949,13 @@ def cmd_about():
     return (
         "I'm the Signal listener for Claude Code, running on %s.\n" % HOST_LABEL +
         "Messages from your ACI only; everything else is dropped.\n"
-        "Models (free tier, Nous Portal): %s to route, %s to answer.\n"
+        "Models via OpenCode Zen — chain: %s; vision: %s.\n"
         "Commands: %s\n"
         "Actions: %s\n"
         "Anything else is answered from server facts or queued for Claude."
         % (
-            CFG["model_classify"].split("/")[-1],
-            CFG["model_answer"].split("/")[-1],
+            " -> ".join(m.split("/")[-1] for m in chain_for("answering")) or "(none)",
+            " -> ".join(m.split("/")[-1] for m in chain_for("vision")) or "(none)",
             " ".join(sorted(T1)),
             " ".join(sorted(T2)),
         )
@@ -1008,8 +1026,10 @@ def cmd_activity():
     """How recent messages were handled — routing, lookups, models used."""
     lines = sh("grep -E '\tplan\t|\texact\t|\tsynonym\t|\tservice\t|\tqueued\t' %s "
                "| tail -8" % AUDIT_FILE, 10)
-    models = "routing/planning: %s | answering: %s (falls back to the routing model)" % (
-        CFG["model_classify"], CFG["model_answer"])
+    benched = [m for m in _load_model_state() if not _usable(m)]
+    models = ("chain: %s | benched: %s"
+              % (" -> ".join(chain_for("answering")) or "(none)",
+                 ", ".join(benched) or "none"))
     return "models — %s\n\nrecent handling:\n%s" % (models, lines or "(nothing yet)")
 
 
@@ -1092,6 +1112,48 @@ def t2_kill(_arg):
     return "command processing DISABLED. delete ~/.config/hongyan/disabled to re-enable"
 
 
+def t2_use(arg):
+    """Put a benched model channel back in service. Owner-only, so T2.
+
+    The complement of triage: a bench is indefinite precisely because it
+    claims a human looked. This is the human saying so.
+    """
+    model = (arg or "").strip()
+    known = {m for chain in ROLE_CHAINS.values() for m in chain}
+    if not model:
+        state = _load_model_state()
+        benched = [m for m, rec in state.items() if not _usable(m)]
+        if not benched:
+            return "no channels are benched."
+        return "benched: %s — 'use <model>' to restore one." % ", ".join(benched)
+    if model not in known:
+        return "refused: '%s' is not a configured model." % model
+    state = _load_model_state()
+    if _usable(model):
+        return "%s was not benched." % model
+    why = clip(state.get(model, {}).get("why", ""), 100)
+    del state[model]
+    tmp = MODEL_STATE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, MODEL_STATE_FILE)
+    audit("model_restored", "%s | had been: %s" % (model, why))
+    # The matching action item has been acted on; clear it.
+    items = load_queue()
+    changed = False
+    for item in items:
+        if not item.get("done") and item.get("kind") == "action" \
+                and item.get("model") == model:
+            item["done"] = True
+            changed = True
+    if changed:
+        save_queue(items)
+    probe, err = _request_once(model, [{"role": "user",
+                                        "content": "Reply with exactly: OK"}])
+    verdict = "back in service" if probe else ("still failing: %s" % err)
+    return "restored %s — %s" % (model, verdict)
+
+
 T2 = {
     "restart": t2_restart,
     "rerun": t2_rerun,
@@ -1099,6 +1161,7 @@ T2 = {
     "mute": t2_mute,
     "kill": t2_kill,
     "done": t2_done,
+    "use": t2_use,
 }
 
 
@@ -1264,9 +1327,9 @@ def describe_image(text, attachments):
     """Return (description, error). error is None on success."""
     if not attachments:
         return "", None
-    vision = CFG.get("model_vision")
+    vision = chain_for("vision")
     if not vision:
-        return "", "no model_vision configured in config.json"
+        return "", "no vision model configured in config.json"
     descriptions = []
     skipped = []
     for att in attachments:
@@ -1301,10 +1364,11 @@ def describe_image(text, attachments):
                 ],
             }
         ]
-        desc = model_call(vision, messages)  # no cap — lets the model reason fully
+        desc = model_call("vision", messages)  # no cap — lets the model reason fully
         if desc is None:
-            audit_fail("model_error", "%s (vision call failed)" % vision)
-            return "", "vision model %s returned no content — I can still answer from your message alone." % vision
+            return "", ("the vision chain could not describe that image (%s) — "
+                        "I can still answer from your message alone."
+                        % " -> ".join(vision))
         descriptions.append(desc.strip())
     if not descriptions:
         if skipped:
@@ -1324,14 +1388,250 @@ def describe_image(text, attachments):
 
 
 def api_key():
-    with open(CFG["key_file"]) as fh:
-        return fh.read().strip()
+    """Optional. The Zen free tier works keyless today; an API key makes
+    usage attributable to an account instead of an IP address."""
+    try:
+        with open(CFG["key_file"]) as fh:
+            return fh.read().strip()
+    except (OSError, KeyError):
+        return ""
+
+
+MODEL_STATE_FILE = os.path.join(STATE_DIR, "model_state.json")
+BENCH_SECONDS = 86400
+
+
+# --------------------------------------------------------------------------
+# Model chains.
+#
+# One provider, one OpenAI-compatible endpoint, ordered fallbacks per role.
+# Free models rotate without notice and the free tier carries an opaque
+# rolling usage cap, so a single configured model is a single point of
+# failure: the first model in the chain that answers wins, and one that
+# fails with a gone-or-credit-wall error is benched for a day while the
+# next steps up. Benching is deliberate — without it, every call would pay
+# the dead model's round-trip before falling through, forever.
+#
+# Preference order is not arbitrary. Ox Alpha Free is both the strongest
+# model here and the most private (its provider keeps nothing); Big Pickle
+# is strong but its free period may train on traffic; the Hermes-tier free
+# models are weakest and carry the same caveat — they are the safety net,
+# not the choice.
+# --------------------------------------------------------------------------
+
+def _build_chains():
+    """Role -> ordered model ids. New chain keys win; the pre-chain single
+    model_* keys keep working so an upgraded listener reads an old config."""
+    text = [m for m in (CFG.get("text_chain") or []) if m]
+    if not text:
+        text = list(dict.fromkeys(
+            m for m in (CFG.get("model_answer"), CFG.get("model_classify")) if m))
+    vision = [m for m in (CFG.get("vision_chain") or []) if m]
+    if not vision and CFG.get("model_vision"):
+        vision = [CFG["model_vision"]]
+    return {"routing": text, "answering": text, "vision": vision}
+
+
+ROLE_CHAINS = _build_chains()
+
+
+def chain_for(role):
+    seen, out = set(), []
+    for m in ROLE_CHAINS.get(role) or []:
+        if m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def _load_model_state():
+    try:
+        with open(MODEL_STATE_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def bench_model(model, why, seconds=BENCH_SECONDS):
+    """Bench a channel. seconds=None means until a human clears it."""
+    state = _load_model_state()
+    state[model] = {
+        "until": (time.time() + seconds) if seconds else None,
+        "why": clip(str(why), 120),
+        "since": time.time(),
+    }
+    tmp = MODEL_STATE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, MODEL_STATE_FILE)
+    audit_fail("model_benched", "%s | %s" % (model, clip(str(why), 100)))
+
+
+def _usable(model):
+    rec = _load_model_state().get(model)
+    if not rec:
+        return True
+    return rec.get("until") is not None and rec.get("until", 0) <= time.time()
+
+
+def _request_once(model, messages, max_tokens=None):
+    """One HTTP attempt. Returns (content, error); exactly one is falsy."""
+    payload = {"model": model, "messages": messages, "temperature": 0}
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    body = json.dumps(payload).encode()
+    headers = {
+        "Content-Type": "application/json",
+        # Required on some endpoints: urllib's default User-Agent 403s.
+        "User-Agent": "hongyan/2.0",
+        "Accept": "application/json",
+    }
+    key = api_key()
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(
+        CFG["api_base"] + "/chat/completions",
+        data=body,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=CFG["model_timeout_seconds"]) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as exc:
+        # The status line alone rarely says WHY ("Free usage exceeded" vs a
+        # plain 429), and the distinction is exactly what triage classifies
+        # on. Read the body the error is carrying.
+        try:
+            detail = exc.read(400).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            detail = ""
+        return None, "%s %s" % (exc, clip(detail, 200))
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    try:
+        content = (data["choices"][0]["message"].get("content") or "").strip()
+    except (KeyError, IndexError):
+        return None, "unexpected response shape"
+    # Reasoning models can spend the whole budget thinking and emit empty
+    # content with finish_reason=length. That is a failure for this question;
+    # another model in the chain may still answer it.
+    return (content, None) if content else (None, "empty content")
+
+
+def model_call(role, messages, max_tokens=None):
+    """Call the first usable model in a role's chain.
+
+    `role` is "routing", "answering" or "vision". max_tokens stays omitted
+    by default: these models reason before emitting content, and any cap
+    risks an empty reply — see the config note.
+
+    Answering outranks bookkeeping. Failures are collected as the walk
+    proceeds; only once a reply is in hand (or every channel has failed)
+    does triage classify them and bench what deserves it. The user never
+    waits on our paperwork.
+    """
+    failures = []
+    for model in chain_for(role):
+        if not _usable(model):
+            continue
+        out, err = _request_once(model, messages, max_tokens)
+        if out is not None:
+            if failures:
+                _triage_failures(failures)
+            return out
+        failures.append((model, err or "empty content"))
+    _triage_failures(failures)
+    if failures:
+        audit_fail("chain_exhausted", "%s | %s" % (
+            role, "; ".join("%s: %s" % (m, e) for m, e in failures)[:200]))
+    return None
+
+
+# --------------------------------------------------------------------------
+# Failure triage.
+#
+# A failed call is classified AFTER the user has been answered, then acted
+# on immediately:
+#
+#   temporary  — overload, timeouts, plain rate limits. The channel gets a
+#                two-minute cooldown so one conversation does not hammer a
+#                struggling endpoint, and it comes back on its own. No
+#                alert, no queue item: transient noise is not news.
+#   review     — the model looks gone, or the free tier's cap wall wants a
+#                human decision (add credits, pick another model). The
+#                channel is benched INDEFINITELY, an alert goes out at once,
+#                and an action item is queued so the next digest raises it.
+#
+# Benching is indefinite precisely so it is honest: "disabled until the
+# user takes a look" must not quietly un-disable itself. `use <model>`
+# puts a channel back after the human has looked.
+# --------------------------------------------------------------------------
+
+_TEMPORARY_FAILURE_RE = re.compile(
+    r"timed? ?out|overload|temporar|bad gateway|\b50[234]\b|too many requests|"
+    r"rate.?limit|connection (reset|refused|error)|proxy", re.I)
+
+_REVIEW_FAILURE_RE = re.compile(
+    r"404|not found|no such model|does not exist|deprecat|decommission|"
+    r"free usage exceeded|requires available credits|add credits|insufficient|quota|"
+    r"unauthorized|forbidden|invalid.{0,20}key|payment", re.I)
+
+TEMP_COOLDOWN_SECONDS = 120
+
+
+def classify_failure(err):
+    """'temporary' | 'review'. Unknown errors stay temporary: disabling a
+    channel on evidence we do not understand would be worse than retrying."""
+    text = str(err or "")
+    if _REVIEW_FAILURE_RE.search(text):
+        return "review"
+    if _TEMPORARY_FAILURE_RE.search(text):
+        return "temporary"
+    return "temporary"
+
+
+def _triage_failures(failures):
+    for model, err in failures:
+        kind = classify_failure(err)
+        if kind == "temporary":
+            if _usable(model):
+                bench_model(model, err, seconds=TEMP_COOLDOWN_SECONDS)
+            continue
+        # Review-grade. Bench indefinitely (an already-benched channel cannot
+        # reach here — the walk skips it), alert once a day, raise one item.
+        bench_model(model, err, seconds=None)
+        note_model_gone(model, err)
+        raise_action_item(model, err)
+
+
+def raise_action_item(model, err):
+    """Queue a 'needs a human' item so the digest offer surfaces the bench.
+
+    Deduped against open items naming the same model — a dead primary fails
+    on several calls before anyone replies, and each failure must not add
+    another copy of the same chore.
+    """
+    marker = "channel down: %s" % model
+    for _, item in pending_items():
+        if marker in item.get("text", ""):
+            return
+    with open(QUEUE_FILE, "a") as fh:
+        fh.write(json.dumps({
+            "ts": time.time(),
+            "text": "%s — benched (%s). Look at config.json when you can; "
+                    "reply 'use %s' to put it back in service."
+                    % (marker, clip(err, 120), model),
+            "kind": "action",
+            "model": model,
+            "done": False,
+        }) + "\n")
+    audit("action_item", marker)
 
 
 MODEL_GONE_FILE = os.path.join(STATE_DIR, "model_gone.json")
 _MODEL_GONE_RE = re.compile(
     r"404|not found|no such model|does not exist|unavailable|requires available credits|"
-    r"decommission|deprecat", re.I)
+    r"free usage exceeded|add credits|decommission|deprecat", re.I)
 
 
 def note_model_gone(model, exc):
@@ -1363,56 +1663,19 @@ def note_model_gone(model, exc):
         pass
 
     audit_fail("model_gone", "%s | %s" % (model, clip(text, 100)))
-    roles = [r for r, m in configured_models().items() if m == model] or ["a"]
+    roles = configured_models().get(model) or "a"
     try:
         subprocess.run(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "hongyan-send.py"),
-             "The %s model (%s) is failing and looks like it is no longer available: %s\n\n"
-             "Set a different one in config.json — 'about' lists what is configured."
-             % (roles[0], model, clip(text, 120))],
+             "The %s model (%s) is failing and looks gone or capped: %s\n"
+             "It is benched until you look at it — the fallback took over for now. "
+             "This is also waiting in your queue as an action item.\n\n"
+             "Put it back with 'use %s', or pick another in config.json."
+             % (roles[0], model, clip(text, 120), model)],
             timeout=60, capture_output=True)
     except Exception as exc2:  # noqa: BLE001
         audit_fail("model_gone_alert", str(exc2)[:100])
-
-
-def model_call(model, messages, max_tokens=None):
-    """Call the model. max_tokens is omitted by default, on purpose.
-
-    These models reason before emitting content, and reasoning length varies
-    with the prompt. Any cap risks spending the whole budget on reasoning and
-    returning finish_reason=length with empty content — which is exactly what
-    happened at 16, 400 and 1500 tokens. The free tier is 500K TPM and cannot
-    be billed, so there is nothing to protect by capping. Reply length is
-    controlled by the prompt and truncated at send time instead.
-    """
-    payload = {"model": model, "messages": messages, "temperature": 0}
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        CFG["api_base"] + "/chat/completions",
-        data=body,
-        headers={
-            "Authorization": "Bearer " + api_key(),
-            "Content-Type": "application/json",
-            # Required: the endpoint 403s urllib's default User-Agent.
-            "User-Agent": "hongyan/1.0",
-            "Accept": "application/json",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=CFG["model_timeout_seconds"]) as resp:
-            data = json.load(resp)
-    except Exception as exc:  # noqa: BLE001
-        audit_fail("model_error", "%s %s" % (model, exc))
-        note_model_gone(model, exc)
-        return None
-    try:
-        return (data["choices"][0]["message"].get("content") or "").strip()
-    except (KeyError, IndexError):
-        audit_fail("model_error", "%s unexpected shape" % model)
-        return None
 
 
 def model_catalog():
@@ -1440,11 +1703,14 @@ def model_catalog():
 
 
 def configured_models():
-    return {
-        "routing": CFG.get("model_classify"),
-        "answering": CFG.get("model_answer"),
-        "vision": CFG.get("model_vision"),
-    }
+    """model id -> "+ "-joined roles it serves, across every chain."""
+    result = {}
+    for role, chain in ROLE_CHAINS.items():
+        for mid in chain:
+            roles = result.setdefault(mid, [])
+            if role not in roles:
+                roles.append(role)
+    return {mid: "+".join(roles) for mid, roles in result.items()}
 
 
 def check_models():
@@ -1465,19 +1731,19 @@ def check_models():
     if catalog is None:
         return "Could not read the model catalog — the API may be down or the key rejected."
 
-    missing = {role: mid for role, mid in configured_models().items()
-               if mid and mid not in catalog}
+    missing = {mid: roles for mid, roles in configured_models().items()
+               if mid not in catalog}
     if not missing:
         return ""
 
     lines = ["MODELS MISSING from the catalog — these will start failing:"]
-    for role, mid in sorted(missing.items()):
-        lines.append("  %s: %s" % (role, mid))
-    free = [m for m in catalog if m.endswith(":free")]
+    for mid, roles in sorted(missing.items()):
+        lines.append("  %s (%s)" % (mid, roles))
+    free = [m for m in catalog if m.endswith(":free") or m.endswith("-free")]
     if free:
         lines.append("")
         lines.append("Still free and available: %s" % ", ".join(sorted(free)))
-    audit_fail("models_missing", ", ".join(sorted(missing.values())))
+    audit_fail("models_missing", ", ".join(sorted(missing)))
     return "\n".join(lines)
 
 
@@ -1601,15 +1867,14 @@ def monthly_review():
 
         configured = configured_models()
         gaps = []
-        for role, mid in configured.items():
-            if mid and mid not in roster:
-                gaps.append("%s model %s is no longer in the free roster" % (role, mid))
-        vision = configured.get("vision")
-        if vision and vision in roster and not roster[vision]["vision"]:
-            gaps.append("%s is configured for vision but is not a vision model" % vision)
+        for mid, roles in sorted(configured.items()):
+            if mid not in roster:
+                gaps.append("%s (%s) is no longer in the free roster" % (mid, roles))
+            elif "vision" in roles.split("+") and not roster[mid].get("vision"):
+                gaps.append("%s is configured for vision but is not a vision model" % mid)
         # A materially larger context window is the one upgrade worth naming
         # automatically; anything else is a quality judgement for a human.
-        answer = configured.get("answering")
+        answer = next((m for m, r in configured.items() if "answering" in r.split("+")), None)
         if answer and answer in roster and roster[answer].get("context"):
             here = roster[answer]["context"]
             bigger = [(n, i["context"]) for n, i in roster.items()
@@ -2047,7 +2312,7 @@ def decide(text, prior, image_desc, steps, challenged, _retry=True):
                  "before answering — do not reverse a previous answer from memory.")
 
     out = model_call(
-        CFG["model_classify"],
+        "routing",
         [
             {"role": "system",
              "content":
@@ -2330,13 +2595,9 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": text[:500]}]
 
-    out = model_call(CFG["model_answer"], messages)
-
-    # Reasoning models time out on large contexts. Fall back to the
-    # non-reasoning model rather than silently queueing a real question.
-    if not out:
-        audit_fail("answer_fallback", CFG["model_classify"])
-        out = model_call(CFG["model_classify"], messages)
+    # The chain carries its own fallbacks, so a single call suffices; if every
+    # channel fails, the queue path below catches the question.
+    out = model_call("answering", messages)
 
     if not out or out.strip().upper().startswith("NOANSWER"):
         return None
