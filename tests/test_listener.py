@@ -898,7 +898,38 @@ m.answer("hard logic puzzle")
 check("config off means no effort is ever sent",
       all(e is None for e in seen_efforts), True)
 m.CFG["adaptive_reasoning"] = _orig_ar if _orig_ar is not None else True
+
+# The user's words outrank the router, gate or no gate.
+seen_efforts.clear()
+captured_systems.clear()
+m.route = lambda t: ([], t, False, "low")
+m.answer("think hard about this logic puzzle")
+check("user 'think hard' beats a routed low",
+      seen_efforts[-1] == "high", True)
+rows = [l for l in open(m.AUDIT_FILE) if "\teffort\t" in l]
+check("the choice is audited with its source",
+      rows and rows[-1].rstrip().endswith("effort\thigh (user)")
+      or "high (user)" in (rows[-1] if rows else ""), True)
+
+seen_efforts.clear()
+m.CFG["adaptive_reasoning"] = False
+m.route = lambda t: ([], t, False, None)
+m.answer("just answer: what's 2+2")
+check("user 'just answer' works even with adaptivity off",
+      seen_efforts[-1] == "low", True)
+m.CFG["adaptive_reasoning"] = _orig_ar if _orig_ar is not None else True
 m._request_once = _real_req
+
+for t in ("think harder about this", "REASON CAREFULLY", "take your time",
+          "high effort please", "step by step derivation", "double-check your work"):
+    check("user-high: %r" % t, bool(m._USER_EFFORT_HIGH_RE.search(t)), True)
+for t in ("low effort is fine", "don't overthink it", "just answer the question",
+          "give me a quick take", "off the cuff guess"):
+    check("user-low: %r" % t, bool(m._USER_EFFORT_LOW_RE.search(t)), True)
+for t in ("my hard drive failed", "the quick brown fox", "thinking about you"):
+    check("neither: %r" % t,
+          (not m._USER_EFFORT_HIGH_RE.search(t))
+          and (not m._USER_EFFORT_LOW_RE.search(t)), True)
 
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")

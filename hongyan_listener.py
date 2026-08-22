@@ -2532,6 +2532,19 @@ def _looks_meta(*texts):
     return any(_META_RE.search(t or "") for t in texts)
 
 
+# The user's own words outrank the router. Asking in so many words is the
+# manual tier — like 'review', it needs no gate's permission. High wins a
+# contradictory message: when unsure whether to think hard, think hard.
+_USER_EFFORT_HIGH_RE = re.compile(
+    r"\b(think(?:ing)?\s+(?:real\w*\s+)?hard(?:er)?|reason\s+carefully|"
+    r"think\s+(?:it\s+)?through|take\s+your\s+time|step\s+by\s+step|"
+    r"high\s+effort|double[- ]check\s+your\s+work)\b", re.I)
+_USER_EFFORT_LOW_RE = re.compile(
+    r"\b(low\s+effort|don'?t\s+(?:over)?think(?:\s+it)?|just\s+answer|"
+    r"quick(?:ie|\s+(?:answer|take|one))|gut\s+(?:answer|reaction)|"
+    r"off\s+the\s+cuff)\b", re.I)
+
+
 def plain_text(text):
     """Strip markdown. Models emit it despite instructions, and Signal shows it raw."""
     if not text:
@@ -2799,6 +2812,16 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     # for real reasoning — and anything unknown leaves the model's own
     # default untouched. Config can switch the whole idea off.
     effort = (routed_effort or None) if CFG.get("adaptive_reasoning", True) else None
+    effort_src = "router" if effort else ""
+    # Explicit words beat the router's guess — and work even with
+    # auto-adaptivity switched off, because a direct instruction is not an
+    # automatic adjustment.
+    if _USER_EFFORT_HIGH_RE.search(text or ""):
+        effort, effort_src = "high", "user"
+    elif _USER_EFFORT_LOW_RE.search(text or ""):
+        effort, effort_src = "low", "user"
+    audit("effort", "%s%s" % (effort or "default",
+                              " (%s)" % effort_src if effort_src else ""))
     # Either signal is enough: the regex covers route()'s blind spots (empty
     # history skips its model; a failed parse loses the flag), and the router
     # covers phrasings the regex never anticipated. A false positive costs a
