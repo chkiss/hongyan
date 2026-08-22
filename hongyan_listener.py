@@ -391,22 +391,27 @@ def resolve_quote(quote):
     return None, "unresolved"
 
 
+EFFORTS = ("low", "high")   # deliberate: 'default' means send nothing at all
+
+
 def route(text):
     """Resolve the message: which past turns matter, a standalone rewrite,
-    and whether the message is about the assistant itself.
+    whether the message is about the assistant itself, and how hard the
+    answer will have to think.
 
     Separated from planning on purpose: a new question should not inherit a
     stale thread's context, and a follow-up is useless without it. This call
     only routes — it never answers.
 
-    The meta verdict rides along in the JSON this call already makes; it
-    costs no extra round trip. It is advisory only — the caller unions it
-    with the local regex, because this function skips its model entirely on
-    an empty history and a failed parse loses every field at once.
+    The meta and effort verdicts ride along in the JSON this call already
+    makes; they cost no extra round trip. Both are advisory — the caller
+    unions meta with the local regex (this function skips its model entirely
+    on an empty history, and a failed parse loses every field at once), and
+    an unknown effort simply leaves the model's own default in place.
     """
     turns = load_history()
     if not turns:
-        return [], text, None
+        return [], text, None, None
 
     recent = turns[-12:]
     catalog = "\n".join(
@@ -421,7 +426,8 @@ def route(text):
                  "You route an incoming message. Decide whether it continues an earlier "
                  "exchange or starts a new topic. Do NOT answer it.\n"
                  'Reply with ONLY JSON: '
-                 '{"mode":"new|followup","turns":[],"standalone":"...","meta":false}\n'
+                 '{"mode":"new|followup","turns":[],"standalone":"...",'
+                 '"meta":false,"effort":"low|default|high"}\n'
                  "turns = indexes of earlier exchanges needed to understand the message "
                  "(empty for a new topic; usually 1-3 for a follow-up).\n"
                  "A message is a follow-up if it uses pronouns like that/it/those, refers "
@@ -430,6 +436,10 @@ def route(text):
                  '"meta" is true ONLY if the message is about the assistant itself — what '
                  "it is, who made it, its source code, how it works — rather than about "
                  "the world or the server.\n"
+                 '"effort": "low" when a glance answers it (a fact, a lookup, small '
+                 "talk); \"high\" when it needs real reasoning (multi-step logic, "
+                 "arithmetic, comparing sources, nuanced grammar); otherwise "
+                 '"default".\n'
                  'Also include "standalone": rewrite the message as a complete, '
                  "self-contained question that names its subject explicitly (for a new "
                  "topic, just repeat the message). This is what gets looked up, so a bare "
@@ -439,10 +449,10 @@ def route(text):
         ],
     )
     if not out:
-        return [], text, None
+        return [], text, None, None
     obj = parse_json_object(out)
     if obj is None:
-        return [], text, None
+        return [], text, None, None
 
     # The standalone rewrite is what gets looked up. Without it a bare "what
     # weekdays?" reaches the loop with an earlier answer in view, and the model
@@ -451,10 +461,12 @@ def route(text):
     standalone = standalone.strip()[:300] if isinstance(standalone, str) and standalone.strip() else text
 
     meta = obj.get("meta") is True
+    effort = obj.get("effort")
+    effort = effort if effort in EFFORTS else None
     if obj.get("mode") != "followup":
-        return [], standalone, meta
+        return [], standalone, meta, effort
     idxs = [i for i in (obj.get("turns") or []) if isinstance(i, int) and 0 <= i < len(recent)]
-    return [recent[i] for i in idxs[:3]], standalone, meta
+    return [recent[i] for i in idxs[:3]], standalone, meta, effort
 
 
 def rewrite_against(turn, text):
@@ -1568,11 +1580,18 @@ def _usable(model):
     return rec.get("until") is not None and rec.get("until", 0) <= time.time()
 
 
-def _request_once(model, messages, max_tokens=None):
-    """One HTTP attempt. Returns (content, error); exactly one is falsy."""
+def _request_once(model, messages, max_tokens=None, effort=None):
+    """One HTTP attempt. Returns (content, error); exactly one is falsy.
+
+    effort: optional reasoning_effort ("low"|"high"). Verified against the
+    Zen endpoint — honoured per-variant, and harmless where a model ignores
+    it: the knob changes how long the model thinks, never whether it may.
+    """
     payload = {"model": model, "messages": messages, "temperature": 0}
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    if effort:
+        payload["reasoning_effort"] = effort
     body = json.dumps(payload).encode()
     headers = {
         "Content-Type": "application/json",
@@ -1612,23 +1631,24 @@ def _request_once(model, messages, max_tokens=None):
     return (content, None) if content else (None, "empty content")
 
 
-def model_call(role, messages, max_tokens=None):
+def model_call(role, messages, max_tokens=None, effort=None):
     """Call the first usable model in a role's chain.
 
     `role` is "routing", "answering" or "vision". max_tokens stays omitted
     by default: these models reason before emitting content, and any cap
-    risks an empty reply — see the config note.
+    risks an empty reply — see the config note. effort, when set, rides
+    every attempt in the walk (a fallback serving a hard question should
+    not silently think less hard).
 
     Answering outranks bookkeeping. Failures are collected as the walk
     proceeds; only once a reply is in hand (or every channel has failed)
-    does triage classify them and bench what deserves it. The user never
-    waits on our paperwork.
+    does triage classify them and bench what deserves it.
     """
     failures = []
     for model in chain_for(role):
         if not _usable(model):
             continue
-        out, err = _request_once(model, messages, max_tokens)
+        out, err = _request_once(model, messages, max_tokens, effort=effort)
         if out is not None:
             if failures:
                 _triage_failures(failures)
@@ -2525,7 +2545,8 @@ def plain_text(text):
     return text.strip()
 
 
-def decide(text, prior, image_desc, steps, challenged, _retry=True):
+def decide(text, prior, image_desc, steps, challenged, _retry=True,
+           effort=None):
     """Ask what to do next. Returns a validated (action, argument) pair.
 
     A small model returns unparseable output often enough to matter: on a bad
@@ -2579,9 +2600,11 @@ def decide(text, prior, image_desc, steps, challenged, _retry=True):
                  % (catalog, text[:400], hist, sofar[:5000])},
             {"role": "user", "content": text[:400]},
         ],
+        effort=effort,
     )
     if not out:
-        return _decide_retry(text, prior, image_desc, steps, challenged, _retry, "empty", "")
+        return _decide_retry(text, prior, image_desc, steps, challenged,
+                             _retry, "empty", "", effort)
     obj = parse_json_object(out)
     if obj is None:
         return _decide_retry(text, prior, image_desc, steps, challenged, _retry,
@@ -2621,7 +2644,7 @@ def decide(text, prior, image_desc, steps, challenged, _retry=True):
 
 
 def _decide_retry(text, prior, image_desc, steps, challenged, allowed,
-                  why="unknown", raw=""):
+                  why="unknown", raw="", effort=None):
     # The retry fires on roughly one agent turn in six, and the malformed output
     # was never recorded — so the prompt could not be tuned against real
     # failures, only guessed at. Log WHAT came back, not just that it happened.
@@ -2629,10 +2652,11 @@ def _decide_retry(text, prior, image_desc, steps, challenged, allowed,
         audit_fail("decide_unparsed", "%s | gave up | raw=%s" % (why, clip(raw, 200)))
         return None, None
     audit("decide_retry", "%s | %s | raw=%s" % (why, clip(text, 80), clip(raw, 200)))
-    return decide(text, prior, image_desc, steps, challenged, _retry=False)
+    return decide(text, prior, image_desc, steps, challenged, _retry=False,
+                  effort=effort)
 
 
-def gather(text, prior, image_desc, notify, sources):
+def gather(text, prior, image_desc, notify, sources, effort=None):
     """Run the loop. Returns (context_blocks, is_task)."""
     steps, context = [], []
     url_pool = []
@@ -2650,7 +2674,8 @@ def gather(text, prior, image_desc, notify, sources):
     taken = 0
 
     while taken < max_steps:
-        action, arg = decide(text, prior, image_desc, steps, challenged)
+        action, arg = decide(text, prior, image_desc, steps, challenged,
+                             effort=effort)
 
         if action == "task" and not context:
             audit("agent", "task | %s" % clip(text))
@@ -2766,9 +2791,14 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     # no say in which turn is used.
     if forced_turn is not None:
         turns, standalone = [forced_turn], rewrite_against(forced_turn, text)
-        routed_meta = None
+        routed_meta, routed_effort = None, None
     else:
-        turns, standalone, routed_meta = route(text)
+        turns, standalone, routed_meta, routed_effort = route(text)
+    # The router judged this message's difficulty in the call it was already
+    # making. Only two explicit settings exist — 'low' for a glance, 'high'
+    # for real reasoning — and anything unknown leaves the model's own
+    # default untouched. Config can switch the whole idea off.
+    effort = (routed_effort or None) if CFG.get("adaptive_reasoning", True) else None
     # Either signal is enough: the regex covers route()'s blind spots (empty
     # history skips its model; a failed parse loses the flag), and the router
     # covers phrasings the regex never anticipated. A false positive costs a
@@ -2784,7 +2814,8 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
 
     # The loop works on the standalone rewrite so a follow-up is looked up
     # properly; the final answer still sees the user's own wording.
-    context, is_task = gather(standalone, prior, image_desc, notify, sources)
+    context, is_task = gather(standalone, prior, image_desc, notify, sources,
+                              effort=effort)
 
     # Deterministic grounding beats hoping the model read its instructions. Asked
     # to "run the updates and upgrades" it answered "I'll run the upgrades now"
@@ -2841,7 +2872,7 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
 
     # The chain carries its own fallbacks, so a single call suffices; if every
     # channel fails, the queue path below catches the question.
-    out = model_call("answering", messages)
+    out = model_call("answering", messages, effort=effort)
 
     if not out or out.strip().upper().startswith("NOANSWER"):
         return None

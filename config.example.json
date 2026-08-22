@@ -32,6 +32,8 @@
   "model_timeout_seconds": 600,
   "_steps_note": "Agent loop budget. The model chooses read-only steps (search / open a page / server probe / weather) until it can answer. Bounded because each step costs a round trip, and because a query composed after reading fetched text is a channel injected content could try to steer.",
   "max_steps": 5,
+  "_adaptive_reasoning_note": "The router already judges every message in the call it was making anyway; with this on, its low/high verdict also sets reasoning_effort on the wire — trivial questions think in zero tokens, hard ones get real reasoning. Unknown verdicts leave the model's own default. Off = never send an effort setting.",
+  "adaptive_reasoning": true,
   "_monthly_review_note": "Who runs the monthly review. 'local' = this machine does it itself (one-device setup). 'remote' = a second machine with a full agent owns it, so this one stays quiet rather than sending a second, contradictory report. 'off' = no review. Either way nothing is sent on a schedule: when the review comes due it is offered after your next message and delivered only if you reply yes — or type 'do the monthly review' to run it on demand.",
   "monthly_review": "local",
   "_roster_check_note": "Off by default. When true, the monthly review asks the provider for its current model roster. That is an unattended request to a service this program is only a client of, and some providers' terms restrict programmatic clients they did not publish — so it is opt-in. With it off, nothing contacts the provider except to answer a message you sent, and a model that disappears reports itself the next time it is needed.",

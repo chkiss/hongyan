@@ -575,7 +575,7 @@ _real_once = m._request_once
 events = []
 
 
-def overload_then_ok(model, messages, max_tokens=None):
+def overload_then_ok(model, messages, max_tokens=None, effort=None):
     events.append(model)
     if model == "x-preview-f-free":
         return None, "gateway overloaded"
@@ -607,7 +607,7 @@ m.subprocess.run = lambda *a, **k: alerts.append(a[0][-1]) or type(
     "R", (), {"returncode": 0})()
 
 
-def capped_then_ok(model, messages, max_tokens=None):
+def capped_then_ok(model, messages, max_tokens=None, effort=None):
     if model == "x-preview-f-free":
         return None, ('402 {"error":{"message":"Free usage exceeded, '
                       'add credits https://opencode.ai/zen"}}')
@@ -633,7 +633,7 @@ if os.path.exists(m.MODEL_GONE_FILE):
     os.remove(m.MODEL_GONE_FILE)
 
 
-def gone_then_ok(model, messages, max_tokens=None):
+def gone_then_ok(model, messages, max_tokens=None, effort=None):
     if model == "big-pickle":
         return None, "HTTP Error 404: Not Found — no such model"
     return "saved by hy3", None
@@ -663,7 +663,7 @@ check("fresh action item surfaces in the digest at once",
 # ------------------------------------------------------------------ restore ---
 section("'use' puts a channel back")
 
-m._request_once = lambda mdl, msgs, max_tokens=None: (
+m._request_once = lambda mdl, msgs, max_tokens=None, effort=None: (
     ("OK", None) if mdl == "x-preview-f-free" else (None, "nope"))
 reply = m.t2_use("x-preview-f-free")
 check("restored after probe succeeded",
@@ -733,22 +733,24 @@ _real_gather = m.gather
 
 def fake_route_model(model, messages, max_tokens=None):
     _captured["prompt"] = messages[0]["content"]
-    return '{"mode":"new","turns":[],"standalone":"x","meta":true}'
+    return ('{"mode":"new","turns":[],"standalone":"x","meta":true,'
+            '"effort":"high"}')
 
 
 m.model_call = fake_route_model
-turns, standalone, meta = m.route("anything")
+turns, standalone, meta, effort = m.route("anything")
 check("router verdict surfaces as third return", meta, True)
+check("effort verdict rides the same call", effort, "high")
 check("routing contract mentions the meta field",
       '"meta":false' in _captured.get("prompt", ""), True)
 
 
 def route_no_meta(t):
-    return [], t, False
+    return [], t, False, None
 
 
 def route_meta(t):
-    return [], t, True
+    return [], t, True, None
 
 
 # ------------------------------------------------- end-to-end injection ------
@@ -757,7 +759,7 @@ section("soul injection end-to-end")
 captured_systems = []
 
 
-def capture_answer_model(role, messages, max_tokens=None):
+def capture_answer_model(role, messages, max_tokens=None, effort=None):
     captured_systems.append(messages[0]["content"])
     return "a short reply"
 
@@ -853,6 +855,50 @@ check("lock is taken on a dedicated fd", "exec 9>" in src, True)
 check("supervise runs with the lock fd closed",
       _re.search(r'supervise"\s+9>&-', src) is not None, True)
 
+
+# ----------------------------------------------- adaptive reasoning ----------
+section("the router sets how hard the answer thinks")
+
+# Two explicit settings only; anything else leaves the model's own default.
+check("effort whitelist", m.EFFORTS, ("low", "high"))
+
+_real_mc_effort = m.model_call
+m.model_call = lambda *a, **k: '{"mode":"new","turns":[],"standalone":"x","effort":"max"}'
+_, _, _, effort = m.route("anything")
+check("unknown effort ('max') degrades to default", effort, None)
+m.model_call = _real_mc_effort
+
+_orig_ar = m.CFG.get("adaptive_reasoning")
+_real_req = m._request_once
+seen_efforts = []
+
+
+def capture_request(model, messages, max_tokens=None, effort=None):
+    seen_efforts.append(effort)
+    return "ok", None
+
+
+m._request_once = capture_request
+out = m.model_call("answering", [{"role": "user", "content": "x"}], effort="high")
+check("model_call forwards effort down the chain", out, "ok")
+check("effort reached the wire", seen_efforts, ["high"])
+
+# End to end: a routed 'low' reaches the answering request; config off kills it.
+captured_systems.clear()
+m.route = lambda t: ([], t, False, "low")
+m.answer("what time is it in tokyo")
+check("routed low rode the answer call",
+      bool(seen_efforts) and seen_efforts[-1] == "low", True)
+
+m.CFG["adaptive_reasoning"] = False
+seen_efforts.clear()
+captured_systems.clear()
+m.route = lambda t: ([], t, False, "high")
+m.answer("hard logic puzzle")
+check("config off means no effort is ever sent",
+      all(e is None for e in seen_efforts), True)
+m.CFG["adaptive_reasoning"] = _orig_ar if _orig_ar is not None else True
+m._request_once = _real_req
 
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
