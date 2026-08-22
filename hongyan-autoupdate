@@ -79,12 +79,18 @@ fi
 
 # Restart only the listener: the daemon rarely changes and owns the account
 # lock. A dead pid file means it was already down — supervise handles both.
+#
+# 9>&- matters more than it looks: without it the new listener inherits this
+# process's lock fd, and a flock outlives its holder as long as any process
+# keeps the descriptor open. The first update worked; every later one then
+# found the lock held by the thing the previous update started, and exited
+# here in silence. Never let the survivor inherit the lock.
 LISTENER_PID="$DIR/listener.pid"
 if [ -f "$LISTENER_PID" ]; then
     kill "$(cat "$LISTENER_PID")" 2>/dev/null
     sleep 1
 fi
-"$HOME/.local/bin/hongyan-supervise"
+"$HOME/.local/bin/hongyan-supervise" 9>&-
 sleep 3
 
 if hongyan_alive "$LISTENER_PID" "hongyan_listener"; then

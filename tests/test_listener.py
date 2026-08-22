@@ -776,6 +776,18 @@ check("covers benched channels", "model channels benched:" in state, True)
 check("covers queue", "queue:" in state, True)
 
 
+# ------------------------------------------------- autoupdate lock -----------
+section("the updater never leaves its lock to a survivor")
+
+# A flock outlives its holder while any process keeps the fd open: the
+# updater's first restart handed the lock to the new listener, and every
+# update after that exited silently at flock -n. Pin the close-on-exec.
+src = open(os.path.join(ROOT, "hongyan-autoupdate")).read()
+check("lock is taken on a dedicated fd", "exec 9>" in src, True)
+check("supervise runs with the lock fd closed",
+      _re.search(r'supervise"\s+9>&-', src) is not None, True)
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 
