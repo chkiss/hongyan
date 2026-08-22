@@ -21,17 +21,25 @@ MODE="${1:---restart}"
 mkdir -p "$DIR"
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-alive() {
-    local pf="$1" want="$2" pid
-    [ -f "$pf" ] || return 1
-    pid="$(cat "$pf" 2>/dev/null)"
-    [ -n "$pid" ] || return 1
-    [ -d "/proc/$pid" ] || return 1
-    tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$want"
-}
+# Rotate here, at the top. It used to sit after the case statement, but the
+# common path — --restart succeeding, every ten minutes — exits first, so the
+# log only ever shrank on days something went wrong.
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 800 ]; then
+    tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi
 
-daemon_up() { alive "$DAEMON_PID" "daemon"; }
-listener_up() { alive "$LISTENER_PID" "hongyan_listener"; }
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+if [ -f "$_hy_dir/hongyan-lib.sh" ]; then
+    . "$_hy_dir/hongyan-lib.sh"
+elif [ -f "$HOME/.local/bin/hongyan-lib.sh" ]; then
+    . "$HOME/.local/bin/hongyan-lib.sh"
+else
+    echo "hongyan-watchdog: cannot find hongyan-lib.sh" >&2
+    exit 1
+fi
+
+daemon_up()   { hongyan_alive "$DAEMON_PID" "daemon"; }
+listener_up() { hongyan_alive "$LISTENER_PID" "hongyan_listener"; }
 
 case "$MODE" in
 --restart)
@@ -107,8 +115,17 @@ case "$MODE" in
         [ "$age" -gt 172800 ] && problems+=("heartbeat stale: $((age/3600))h")
     fi
 
-    # Received images pile up in the attachment store forever otherwise.
-    find "$HOME/.local/share/signal-cli/attachments" -type f -mtime +14 -delete 2>/dev/null
+    # Received images pile up in the attachment store forever otherwise. Read
+    # the directory from the same config key the listener uses — a hardcoded
+    # copy here drifted apart the moment anyone moved attachment_dir.
+    ATT_DIR="$(/usr/bin/python3 -c '
+import json, os
+cfg = json.load(open(os.path.expanduser("~/.config/hongyan/config.json")))
+print(os.path.expanduser(cfg.get("attachment_dir")
+                         or "~/.local/share/signal-cli/attachments"))
+' 2>/dev/null || true)"
+    ATT_DIR="${ATT_DIR:-$HOME/.local/share/signal-cli/attachments}"
+    find "$ATT_DIR" -type f -mtime +14 -delete 2>/dev/null
 
     # The morning nudge for anything queued and still open. Prints nothing when
     # there is nothing to say, so a quiet day stays quiet. This is the only
@@ -174,7 +191,3 @@ case "$MODE" in
     fi
     ;;
 esac
-
-if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 800 ]; then
-    tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
-fi

@@ -81,8 +81,10 @@ add_cron() {  # add_cron <schedule> <command> <comment>
         info "cron already has: $command"
         return 0
     fi
+    # Drop only LEADING blank lines (an empty crontab produces one). The old
+    # `/^$/d` stripped every blank line from an existing crontab too.
     printf '%s\n# %s\n%s %s\n' "$current" "$comment" "$schedule" "$command" \
-        | sed '/^$/d' | crontab -
+        | sed '/./,$!d' | crontab -
     ok "cron: $schedule $command"
 }
 
@@ -121,7 +123,7 @@ install_server() {
 
     say "Linking commands into $BIN"
     local f
-    for f in hongyan_listener.py hongyan-supervise hongyan-watchdog hongyan-send.py hongyan-me; do
+    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-send.py hongyan-me; do
         [ -e "$REPO/$f" ] || continue
         if [ -e "$BIN/$f" ] && [ ! -L "$BIN/$f" ]; then
             mv "$BIN/$f" "$BIN/$f.pre-install"

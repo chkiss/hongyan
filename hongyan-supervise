@@ -14,16 +14,17 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 
-alive() {
-    local pf="$1" want="$2" pid
-    [ -f "$pf" ] || return 1
-    pid="$(cat "$pf" 2>/dev/null)"
-    [ -n "$pid" ] || return 1
-    [ -d "/proc/$pid" ] || return 1
-    tr "\0" " " < "/proc/$pid/cmdline" 2>/dev/null | grep -q -- "$want"
-}
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+if [ -f "$_hy_dir/hongyan-lib.sh" ]; then
+    . "$_hy_dir/hongyan-lib.sh"
+elif [ -f "$HOME/.local/bin/hongyan-lib.sh" ]; then
+    . "$HOME/.local/bin/hongyan-lib.sh"
+else
+    echo "hongyan-supervise: cannot find hongyan-lib.sh" >&2
+    exit 1
+fi
 
-if ! alive "$DAEMON_PID" "daemon"; then
+if ! hongyan_alive "$DAEMON_PID" "daemon"; then
     rm -f "$SOCK"
     nohup "$HOME/.local/bin/signal-cli" daemon \
         --socket "$SOCK" --receive-mode on-connection --no-receive-stdout \
@@ -36,7 +37,7 @@ if ! alive "$DAEMON_PID" "daemon"; then
     echo "$(date "+%F %T") daemon started pid $(cat "$DAEMON_PID")" >> "$LOG"
 fi
 
-if [ -S "$SOCK" ] && ! alive "$LISTENER_PID" "hongyan_listener"; then
+if [ -S "$SOCK" ] && ! hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
     nohup /usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" >> "$LISTENER_LOG" 2>&1 &
     echo $! > "$LISTENER_PID"
     echo "$(date "+%F %T") listener started pid $(cat "$LISTENER_PID")" >> "$LISTENER_LOG"
