@@ -137,12 +137,11 @@ install_server() {
     say "Scheduling"
     add_cron "@reboot" "sleep 30 && $BIN/hongyan-supervise" "Start at boot"
     add_cron "*/10 * * * *" "$BIN/hongyan-watchdog --restart" "Quiet restart if it dies"
-    add_cron "23 8 * * *" "$BIN/hongyan-watchdog --daily" "Daily health check + queue digest"
-    if [ "$review_mode" = "local" ]; then
-        add_cron "0 9 1 * *" "$BIN/hongyan-watchdog --monthly" "Monthly review"
-    else
-        info "monthly review runs on the other machine; no cron line added here"
-    fi
+    add_cron "23 8 * * *" "$BIN/hongyan-watchdog --daily" "Daily health check"
+    # No cron for the monthly review: it is offered in conversation after a
+    # message you sent, and runs only if you reply yes. A scheduled send would
+    # be an automated message — Signal's terms forbid that, and so does the
+    # design. Type 'review' any time, or 'do the monthly review'.
 
     say "Tests"
     if python3 "$REPO/tests/test_listener.py" >/dev/null 2>&1; then

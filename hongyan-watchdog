@@ -8,7 +8,12 @@
 # Costs nothing in either mode: no model is called, and a Signal send is free.
 # Claude is never invoked.
 #
-# Liveness uses PID files, not `pgrep -f` — see hongyan-supervise for why.
+# Nothing here sends anything on a schedule except failure alerts: the monthly
+# review and the queue digest are offered in conversation instead (Signal's
+# terms forbid automated messages), so only a reply from the owner can make
+# this program put words on the wire unprompted.
+#
+# Liveness uses PID files, not `pgrep -f` — see hongyan-lib.sh for why.
 set -uo pipefail
 
 DIR="$HOME/.config/hongyan"
@@ -127,26 +132,13 @@ print(os.path.expanduser(cfg.get("attachment_dir")
     ATT_DIR="${ATT_DIR:-$HOME/.local/share/signal-cli/attachments}"
     find "$ATT_DIR" -type f -mtime +14 -delete 2>/dev/null
 
-    # The morning nudge for anything queued and still open. Prints nothing when
-    # there is nothing to say, so a quiet day stays quiet. This is the only
-    # thing that ever reads the queue back out: before it, captured reminders
-    # ("call the vet") sat unread indefinitely.
-    send_digest() {
-        digest="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --digest 2>>"$LOG")"
-        if [ -n "$digest" ]; then
-            printf '%s' "$digest" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-                >> "$LOG" 2>&1
-            log "queue digest sent"
-        fi
-    }
-
     # No provider poll here, deliberately. A model that has gone reports itself
     # the next time a real message needs it — see note_model_gone — so nothing
-    # contacts the inference API on a timer.
+    # contacts the inference API on a timer. The queue digest is likewise not
+    # sent here: it is offered in conversation, after a message the owner sent.
 
     if [ "${#problems[@]}" -eq 0 ]; then
         log "daily ok"
-        send_digest
         exit 0
     fi
 
@@ -156,7 +148,6 @@ print(os.path.expanduser(cfg.get("attachment_dir")
 
     if daemon_up && listener_up; then
         log "daily: recovered by restart"
-        send_digest
         exit 0
     fi
 
@@ -166,18 +157,6 @@ print(os.path.expanduser(cfg.get("attachment_dir")
         "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
         >> "$LOG" 2>&1
     log "daily: alert sent"
-    ;;
---monthly)
-    # The self-contained monthly review: roster movement, capability gaps and
-    # a month of logged defects. Silent when config sets monthly_review to
-    # "remote" (a second machine owns it) or "off".
-    report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --monthly 2>>"$LOG")"
-    if [ -n "$report" ]; then
-        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
-        log "monthly review sent"
-    else
-        log "monthly review: nothing to send"
-    fi
     ;;
 
 --models)
