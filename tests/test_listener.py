@@ -349,6 +349,106 @@ else:
     m.CFG["attachment_dir"] = _orig_attach_dir
 
 
+# ------------------------------------------------------------------ offers ---
+section("offers: pull-only periodic delivery")
+
+# Nothing periodic may ever SEND itself; it waits here until an answer makes
+# it go out. These checks hold the state machine together.
+os.path.exists(m.OFFERS_FILE) and os.remove(m.OFFERS_FILE)
+open(m.QUEUE_FILE, "w").close()
+
+# A box that has never been reviewed is due at once — month one counts too.
+check("a never-reviewed box is due", m.nudge_due(), "review")
+check("review due when never run", m.review_due(m.load_offers()), True)
+check("nudge prefers the review", m.nudge_due(), "review")
+
+# Offering stamps the cycle — no second offer this month however much you chat.
+offers = m.load_offers()
+offers["review_offer"] = {"stamp": m._month_now(), "at": time.time(),
+                          "outstanding": True}
+m.save_offers(offers)
+check("no re-offer after offering", m.nudge_due(), None)
+check("offer still answerable inside its window",
+      m.outstanding_nudge(m.load_offers()), "review")
+
+# Bare phrases capture consent; sentences fall through to normal handling.
+check("bare yes affirms", m.classify_reply("Yes"), "affirm")
+check("go ahead affirms", m.classify_reply("  go ahead! "), "affirm")
+check("half-sentence falls through", m.classify_reply("yes and also check nginx"), None)
+check("decline recognised", m.classify_reply("Not now."), "decline")
+check("plain chat is neither", m.classify_reply("what time is it in tokyo?"), None)
+
+
+# ------------------------------------------------------- explicit requests ---
+section("explicit review request runs without asking")
+
+for text in ("do the monthly review", "run the review", "Do your monthly review!",
+             "please run the monthly review", "review now", "send me the report"):
+    check("runs on %r" % text, bool(m.REVIEW_RUN_RE.match(text)), True)
+for text in ("does the monthly review still work?", "what did the review say?",
+             "how was the review?", "i want a review of my portfolio",
+             "did the review run", "do it"):
+    check("ignores %r" % text, bool(m.REVIEW_RUN_RE.match(text)), False)
+
+
+# --------------------------------------------------- offer window expiry -----
+section("an ignored offer expires silently")
+
+offers = m.load_offers()
+offers["review_offer"]["at"] = time.time() - m.REVIEW_OFFER_TTL - 60
+m.save_offers(offers)
+offers = m.load_offers()
+got = m.outstanding_nudge(offers)
+m.save_offers(offers)
+check("past the window it stops answering", got, None)
+check("and stays quiet for the rest of the month",
+      m.review_due(m.load_offers()), False)
+
+
+# ------------------------------------------------------------ digest offer ---
+section("digest rides along on its own day")
+
+m.queue_note("an item left waiting long ago")
+items = m.load_queue()
+items[0]["ts"] = time.time() - 90000
+m.save_queue(items)
+os.path.exists(m.OFFERS_FILE) and os.remove(m.OFFERS_FILE)
+offers = m.load_offers()
+offers["last_review"] = m._month_now()  # take the review out of the picture
+m.save_offers(offers)
+check("digest due when items have waited", m.nudge_due(), "digest")
+offers = m.load_offers()
+offers["digest_offer"] = {"stamp": m._today_str(), "at": time.time(),
+                          "outstanding": True}
+m.save_offers(offers)
+check("digest offered once per day", m.nudge_due(), None)
+m.t2_done("all")
+
+
+# ------------------------------------------------------------------- mute ----
+section("mute finally means something")
+
+os.path.exists(m.OFFERS_FILE) and os.remove(m.OFFERS_FILE)
+with open(m.MUTE_FILE, "w") as fh:
+    fh.write(str(time.time() + 3600))
+check("muted silences every offer", m.nudge_due(), None)
+os.remove(m.MUTE_FILE)
+check("expired mute restores them", m.nudge_due(), "review")
+
+
+# --------------------------------------------------------- review command ----
+section("review command honours the mode")
+
+_orig_mode = m.CFG.get("monthly_review")
+m.CFG["monthly_review"] = "off"
+check("off explains itself", m.cmd_review(),
+      "(the monthly review is switched off in config)")
+m.CFG["monthly_review"] = "remote"
+check("remote points elsewhere", m.cmd_review(),
+      "(the monthly review runs on your other machine)")
+m.CFG["monthly_review"] = _orig_mode if _orig_mode is not None else "local"
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

@@ -55,7 +55,9 @@ The useful consequence is that this survives a bad model, a jailbreak buried in 
 
 ### It only acts when you tell it to
 
-hongyan does nothing on its own initiative. Every message it sends and every request it makes to a model provider is the direct result of you texting it — there is no polling, no background chatter, no unattended traffic against anyone else's service. The only scheduled jobs are local: a watchdog that checks whether its own processes are alive, and a monthly review that reads its own log.
+hongyan does nothing on its own initiative. Every message it sends and every request it makes to a model provider is the direct result of you texting it — there is no polling, no background chatter, no unattended traffic against anyone else's service. The only scheduled job is local: a watchdog that checks whether its own processes are alive.
+
+This is deliberate beyond good manners. Signal's terms forbid automated messaging, and the design agrees with them: nothing periodic — not the monthly review, not the queue digest, not anything else — is ever *sent* on a timer. When one comes due it waits in a local file, rides along as a second text after your next answered message ("by the way, it's time for the monthly review — reply yes to run it"), and goes out only after you say yes. Ignored offers go quiet on their own; declining defers a full cycle. You can also skip the dance entirely: type `review` or "do the monthly review" and it just runs — asking by name *is* the permission.
 
 Even the model-availability warning works this way. Rather than polling to ask whether a model still exists, it notices when a real request fails and tells you then, which is both simpler and the moment it first matters.
 
@@ -87,9 +89,9 @@ It only ever messages its owner. There is no path by which it contacts anyone el
 - **Reads photos.** An image is described first, and that description feeds the normal pipeline — so "how much is this worth?" gets both a look and a search, rather than a guess from the caption alone.
 - **Understands replies.** Reply to any earlier message and that conversation becomes the context, overriding the automatic follow-up detection. It confirms by replying as a Signal quote, so a wrong match is visible immediately instead of producing a baffling answer.
 - **Tracks follow-ups.** A separate step decides which earlier exchanges matter and rewrites your message as a standalone question before anything is looked up, so "what about the plural?" gets researched properly.
-- **Keeps a queue.** Anything that's a task rather than a question is saved and resurfaced in a morning summary until you clear it.
+- **Keeps a queue.** Anything that's a task rather than a question is saved and offered back the next time you text it — "3 things have been waiting since 2d ago, reply yes for the list" — until you clear it.
 - **Looks after itself.** A watchdog restarts what dies, escalates over Signal when restarts keep failing, tells you how long it was down once it recovers, and warns you if a model it depends on has left the catalogue.
-- **Reviews itself monthly.** It diffs the free-model roster, flags capability gaps against how it's wired, and summarises the defects it logged — counted by kind, so a recurring fault is distinguishable from a one-off. The review is deliberately plain code with no model call, because something that exists to catch the assistant misbehaving shouldn't depend on the assistant behaving.
+- **Reviews itself monthly, on your say-so.** When the month rolls over it waits; your next message gets an offer, and only a yes sends anything — or type "do the monthly review" to skip the ceremony. It diffs the free-model roster, flags capability gaps against how it's wired, and summarises the defects it logged — counted by kind, so a recurring fault is distinguishable from a one-off. The review is deliberately plain code with no model call, because something that exists to catch the assistant misbehaving shouldn't depend on the assistant behaving.
 - **Never goes quiet.** Every path that drops a message — too old, rate limited, kill switch, unrecognised quote — says so. An unexplained non-reply is indistinguishable from a crash.
 
 ## What it won't do
@@ -146,7 +148,7 @@ Nothing here needs systemd, deliberately: user timers need lingering enabled, wh
 
 ### One device or two
 
-**One device** is the default: everything runs on the server, including a monthly self-review that summarises the defects it logged that month — counted by kind, so a recurring fault stands out from a one-off — and messages you the result. It reads its own log and nothing else, unless you opt into `roster_check`. Nothing else is required.
+**One device** is the default: everything runs on the server, including a monthly self-review that summarises the defects it logged that month — counted by kind, so a recurring fault stands out from a one-off. It reads its own log and nothing else, unless you opt into `roster_check`. The review is never sent on a schedule: it is offered after your next message and delivered only when you reply yes. Nothing else is required.
 
 **Two devices** adds a second machine that runs a richer monthly review with a full agent — one with the memory and tooling to judge whether a new model actually *suits* the job, propose concrete wiring changes, and apply them once you approve.
 
@@ -156,7 +158,7 @@ Set the server up as above, then on the review host — one command again, and n
 curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install-review-host.sh | bash
 ```
 
-It checks it can actually reach the server, points the server's `monthly_review` at `remote` so you don't get two reports that disagree, removes the server's own monthly cron line, and writes a brief for the review agent to follow.
+It checks it can actually reach the server, points the server's `monthly_review` at `remote` so you don't get two reports that disagree, and writes a brief for the review agent to follow.
 
 The review host reaches the server over SSH. The server never needs to reach back, so it can sit behind NAT with no inbound access, and approvals cross the gap by keyword: the reviewer writes the words it will accept, the listener watches for them in your replies, and the reviewer polls for the match.
 
