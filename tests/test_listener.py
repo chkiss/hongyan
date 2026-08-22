@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -144,6 +145,24 @@ check("unrelated topics differ",
       m._similar(m._norm("chinese modal verbs"), m._norm("tour de france history")), False)
 
 
+# ------------------------------------------------------- json extraction ---
+section("json object extraction")
+
+# route() matched greedily and decide() non-greedily; each failed on a
+# different shape of prose-wrapped model output.
+check("plain object", m.parse_json_object('{"mode":"new"}'), {"mode": "new"})
+check("prose around the object",
+      m.parse_json_object('Sure! {"mode":"followup","turns":[1]} hope that helps'),
+      {"mode": "followup", "turns": [1]})
+# Non-greedy matching stopped at this inner brace and lost the rest.
+check("brace inside a string value",
+      m.parse_json_object('{"standalone":"use {x} here"}'),
+      {"standalone": "use {x} here"})
+check("array is not an object", m.parse_json_object('[1,2]'), None)
+check("no json", m.parse_json_object('no json at all'), None)
+check("empty input", m.parse_json_object(''), None)
+
+
 # ------------------------------------------------------- loop termination ---
 section("agent loop termination")
 
@@ -196,6 +215,7 @@ section("a vanished model reports itself")
 # a timer. A model that has gone is detected from a call that actually failed,
 # which is a request a person caused by sending a message.
 sent = []
+_real_subprocess_run = m.subprocess.run
 m.subprocess.run = lambda *a, **k: sent.append(a[0][-1]) or type("R", (), {"returncode": 0})()
 os.path.exists(m.MODEL_GONE_FILE) and os.remove(m.MODEL_GONE_FILE)
 
@@ -213,6 +233,10 @@ m.note_model_gone("other/model:free", Exception("timed out"))
 check("timeout stays quiet", len(sent), 1)
 m.note_model_gone("other/model:free", Exception("requires available credits"))
 check("credit wall raises the alarm", len(sent), 2)
+
+# Restore the real runner: this stub leaked into every later subprocess call,
+# including the CLI-flag tests below.
+m.subprocess.run = _real_subprocess_run
 
 # The monthly review must not reach the provider unless explicitly allowed.
 check("roster polling is off by default", bool(m.CFG.get("roster_check")), False)
@@ -278,6 +302,66 @@ check("custom probe carries its command",
       "backup.log" in m.PROBE_REGISTRY["backups"][1], True)
 # A config typo must not quietly redefine a built-in.
 check("built-ins cannot be shadowed", m.T1["status"].__name__, "cmd_status")
+
+
+# ---------------------------------------------------------------- fetching ---
+section("fetch refuses non-public hosts")
+
+# Result URLs come off a search page, so they are semi-trusted input; a
+# crafted one must not point the fetcher at this machine's own services.
+# Numeric literals need no DNS, so these work offline.
+check("loopback blocked", m._public_host("http://127.0.0.1:8080/x"), False)
+check("rfc1918 blocked", m._public_host("http://10.1.2.3/"), False)
+check("link-local metadata blocked",
+      m._public_host("http://169.254.169.254/latest/meta-data/"), False)
+check("ipv6 loopback blocked", m._public_host("http://[::1]/"), False)
+check("public literal allowed", m._public_host("https://1.1.1.1/"), True)
+check("unparseable url blocked", m._public_host("not a url"), False)
+
+
+# ------------------------------------------------------------ attachments ---
+section("mixed attachments")
+
+_imgfile = os.path.join(_TMP, "testatt.jpg")
+with open(_imgfile, "wb") as fh:
+    fh.write(b"\xff\xd8" + b"0" * 32)
+
+_orig_model_call = m.model_call
+_orig_attach_dir = m.CFG.get("attachment_dir")
+m.model_call = lambda *a, **k: "a red bicycle against a wall"
+m.CFG["attachment_dir"] = _TMP
+
+desc, err = m.describe_image("what is this", [
+    {"id": "testatt", "contentType": "image/jpeg"},
+    {"id": "report", "contentType": "application/pdf"},
+])
+check("image still described beside a pdf", err, None)
+check("description present", desc.startswith("a red bicycle"), True)
+check("pdf noted as skipped", "application/pdf" in desc, True)
+
+desc2, err2 = m.describe_image("", [{"contentType": "video/mp4"}])
+check("all-non-image still errors", (err2 is not None and "mp4" in err2), True)
+
+m.model_call = _orig_model_call
+if _orig_attach_dir is None:
+    del m.CFG["attachment_dir"]
+else:
+    m.CFG["attachment_dir"] = _orig_attach_dir
+
+
+# ------------------------------------------------------------- cli flags ---
+section("unknown cli flag dies")
+
+listener_py = os.path.join(ROOT, "hongyan_listener.py")
+r = subprocess.run([sys.executable, listener_py, "--digets"],
+                   capture_output=True, text=True)
+# A typo used to fall through to main() and start connecting as a daemon.
+check("typo exits 2, does not connect", r.returncode, 2)
+check("names the valid flags", "--digest" in r.stderr, True)
+
+r2 = subprocess.run([sys.executable, listener_py, "--digest"],
+                    capture_output=True, text=True)
+check("known flag exits cleanly", r2.returncode, 0)
 
 
 # ---------------------------------------------------------------------------
