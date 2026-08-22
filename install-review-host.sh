@@ -26,6 +26,12 @@ warn() { printf '  \033[33m!\033[0m %s\n' "$*"; }
 ok()   { printf '  \033[32mok\033[0m %s\n' "$*"; }
 die()  { printf '\n\033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
+confirm() {  # confirm <prompt>  -> 0 for yes
+    local reply
+    read -r -p "  $1 [y/N]: " reply
+    case "$reply" in [yY]*) return 0 ;; *) return 1 ;; esac
+}
+
 say "hongyan — review host setup"
 info "This machine will audit a hongyan server once a month."
 info "It needs SSH access to that server. Nothing else."
@@ -50,7 +56,7 @@ fi
 
 say "Testing SSH"
 info "Connecting to $TARGET ..."
-if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$TARGET" 'echo hongyan-ssh-ok' 2>/dev/null | grep -q hongyan-ssh-ok; then
+if ! ssh -n -o ConnectTimeout=10 -o BatchMode=yes "$TARGET" 'echo hongyan-ssh-ok' 2>/dev/null | grep -q hongyan-ssh-ok; then
     die "Could not reach $TARGET without a password.
 Set up key-based SSH first:
     ssh-copy-id $TARGET
@@ -59,7 +65,7 @@ fi
 ok "reached $TARGET and ran a command there"
 
 say "Checking it is actually a hongyan server"
-if ssh -o BatchMode=yes "$TARGET" 'test -f ~/.config/hongyan/config.json' 2>/dev/null; then
+if ssh -n -o BatchMode=yes "$TARGET" 'test -f ~/.config/hongyan/config.json' 2>/dev/null; then
     ok "found ~/.config/hongyan/config.json"
 else
     warn "No hongyan config found at ~/.config/hongyan/config.json on $TARGET."
@@ -69,7 +75,7 @@ else
 fi
 
 say "Handing the monthly review to this machine"
-if ssh -o BatchMode=yes "$TARGET" 'python3 - <<PY
+if ssh -n -o BatchMode=yes "$TARGET" 'python3 - <<PY
 import json, os
 p = os.path.expanduser("~/.config/hongyan/config.json")
 try:
@@ -86,8 +92,8 @@ else
     warn "by hand, or you will get two monthly reports that disagree."
 fi
 
-if ssh -o BatchMode=yes "$TARGET" 'crontab -l 2>/dev/null | grep -q -- "--monthly"' 2>/dev/null; then
-    ssh -o BatchMode=yes "$TARGET" 'crontab -l 2>/dev/null | grep -v -- "--monthly" > /tmp/hongyan.cron && crontab /tmp/hongyan.cron && rm -f /tmp/hongyan.cron' 2>/dev/null \
+if ssh -n -o BatchMode=yes "$TARGET" 'crontab -l 2>/dev/null | grep -q -- "--monthly"' 2>/dev/null; then
+    ssh -n -o BatchMode=yes "$TARGET" 'crontab -l 2>/dev/null | grep -v -- "--monthly" > /tmp/hongyan.cron && crontab /tmp/hongyan.cron && rm -f /tmp/hongyan.cron' 2>/dev/null \
         && ok "removed the server's own monthly cron line" \
         || warn "could not edit the server crontab; remove the --monthly line by hand"
 else
@@ -113,13 +119,18 @@ say "Installing the monthly review runner"
 # server sat in remote mode forever waiting for a reviewer that did not
 # exist. The runner is part of the setup now, not a homework note.
 RUNNER="$HOME/.local/bin/hongyan-monthly-review"
-BASE_URL="${BRIEF_URL%/*}"
+# The brief lives under docs/; the runner at the repo root. Strip to the
+# raw root whichever style of URL we were given.
+case "$BRIEF_URL" in
+    */docs/*) RUNNER_URL="${BRIEF_URL%/docs/*}/hongyan-monthly-review" ;;
+    *)        RUNNER_URL="${BRIEF_URL%/*}/hongyan-monthly-review" ;;
+esac
 if command -v curl >/dev/null; then
-    curl -fsSL "$BASE_URL/hongyan-monthly-review" -o "$RUNNER" \
-        || die "Could not download the runner from $BASE_URL"
+    curl -fsSL "$RUNNER_URL" -o "$RUNNER" \
+        || die "Could not download the runner from $RUNNER_URL"
 elif command -v wget >/dev/null; then
-    wget -qO "$RUNNER" "$BASE_URL/hongyan-monthly-review" \
-        || die "Could not download the runner from $BASE_URL"
+    wget -qO "$RUNNER" "$RUNNER_URL" \
+        || die "Could not download the runner from $RUNNER_URL"
 fi
 chmod +x "$RUNNER"
 printf '%s\n' "$TARGET" > "$DEST/review-target"
