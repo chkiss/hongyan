@@ -26,6 +26,7 @@ No shell, no filesystem, no writes, no credentials are reachable from it.
 import base64
 import glob
 import html
+import ipaddress
 import json
 import os
 import queue as queuelib
@@ -1597,13 +1598,57 @@ def web_search(query, limit=5):
     return out, host, urls
 
 
+def _public_host(url):
+    """False unless every address `url`'s host resolves to is public.
+
+    Result URLs come off a third-party search page, so they are semi-trusted
+    input. Without this check a crafted result (or a redirect) could point the
+    fetcher at this machine's own loopback or internal services and feed what
+    it finds back into the reply.
+    """
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            addr = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if not addr.is_global:  # covers loopback, RFC1918, link-local, etc.
+            return False
+    return True
+
+
+class _SafeRedirects(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects to non-public hosts — the pre-flight check in
+    fetch_text only sees the first URL; hops after that pass through here."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _public_host(newurl):
+            audit_fail("fetch_blocked", "redirect -> %s" % clip(newurl, 120))
+            raise urllib.error.HTTPError(
+                req.full_url, code, "blocked redirect to non-public host",
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_FETCH_OPENER = urllib.request.build_opener(_SafeRedirects())
+
+
 def fetch_text(url, limit=1500):
     if not url.startswith(("http://", "https://")):
+        return None
+    if not _public_host(url):
+        audit_fail("fetch_blocked", clip(url, 120))
         return None
     try:
         req = urllib.request.Request(
             url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        with _FETCH_OPENER.open(req, timeout=20) as resp:
             ctype = resp.headers.get("Content-Type", "")
             if "html" not in ctype and "text" not in ctype:
                 return None
