@@ -1018,6 +1018,132 @@ else:
     m.CFG["attachment_dir"] = _orig_dir
 
 
+# ---------------------------------------------------- borrowed capabilities ---
+section("usage telemetry")
+
+open(m.USAGE_FILE, "w").write(json.dumps({"date": "2000-01-01"}))
+m._record_usage({"prompt_tokens": 100, "completion_tokens": 50,
+                 "completion_tokens_details": {"reasoning_tokens": 20}})
+m._record_usage({"prompt_tokens": 10, "completion_tokens": 5,
+                 "completion_tokens_details": {}})
+line = m.usage_line()
+check("same-day usage accumulates", "110 in / 55 out" in line and "20 reasoning" in line
+      and "2 requests" in line, True)
+open(m.USAGE_FILE, "w").write(json.dumps({"date": "2000-01-01", "prompt": 9}))
+check("yesterday's numbers don't leak into today", m.usage_line(), "")
+
+section("document reading")
+
+docfile = os.path.join(_TMP, "readdoc")
+with open(docfile, "w") as fh:
+    fh.write("THE SECRET ZEBRA FACTS\n" + "filler " * 50)
+att_doc = [{"id": "readdoc", "contentType": "text/plain"}]
+_orig_dir_docs = m.CFG.get("attachment_dir")
+m.CFG["attachment_dir"] = _TMP
+captured_docs = {}
+
+
+def answer_capture(text, notify=None, image_desc="", sources_out=None,
+                   forced_turn=None, doc_context=""):
+    captured_docs["ctx"] = doc_context
+    return "answered from doc"
+
+
+m.queue_note_orig = m.queue_note
+_real_answer = m.answer
+m.answer = answer_capture
+m.dispatch("summarize this", None, att_doc, [])
+check("document text reached the answer",
+      "SECRET ZEBRA FACTS" in captured_docs.get("ctx", ""), True)
+check("consumed attachment did not hit the vision path",
+      not m.describe_image.last_was_exhausted, True)
+m.answer = _real_answer
+if _orig_dir_docs is None:
+    del m.CFG["attachment_dir"]
+else:
+    m.CFG["attachment_dir"] = _orig_dir_docs
+
+section("timed reminders")
+
+open(m.QUEUE_FILE, "w").close()
+now = time.time()
+future = m.parse_due("remind me at 23:59 to flip the server", now=now)
+check("'at HH:MM' parses to a real ts", isinstance(future, float) and future > now, True)
+past_time = m.parse_due("at 3am water the plants", now=now)
+check("a time already past rolls to tomorrow", past_time > now + 3600, True)
+check("'in 2 hours' parses", abs(m.parse_due("in 2 hours check backups", now=now)
+                                - (now + 7200)) < 5, True)
+check("unparsed text yields no due", m.parse_due("buy milk"), None)
+
+m.queue_note("remind me in 1 minute to stretch")
+items = m.load_queue()
+check("due stored on the item", bool(items[-1].get("due")), True)
+items[-1]["due"] = time.time() - 10
+m.save_queue(items)
+check("overdue reminder counts as waiting immediately",
+      any(i.get("text") == "remind me in 1 minute to stretch"
+          for _, i in [(n, i) for n, i in m.pending_items()
+                       if m._is_waiting(i)]), True)
+digest = m.queue_digest()
+check("due marker visible in digest", "[DUE]" in digest or "[due" in digest, True)
+m.t2_done("all")
+
+section("long-term memory")
+
+if os.path.exists(m.MEMORY_FILE):
+    os.remove(m.MEMORY_FILE)
+check("remember requires content", m.t2_remember("").startswith("remember what"), True)
+m.t2_remember("the roof deck key hangs by the back door")
+m.t2_remember("meeting cadence is every second tuesday")
+check("memory_block carries facts into prompts",
+      "roof deck key" in m.memory_block(), True)
+check("forget drops only matches",
+      "forgot 1 fact" in m.t2_forget("roof deck"), True)
+check("survivor stays", "cadence" in "\n".join(m.load_memory()), True)
+check("forget unknown says so", "nothing matches" in m.t2_forget("xyzzy"), True)
+os.remove(m.MEMORY_FILE)
+
+section("voice notes (on-demand STT)")
+
+ogg = os.path.join(_TMP, "voicenote")
+with open(ogg, "wb") as fh:
+    fh.write(b"OggS-fake-audio")
+_orig_stt = dict(m.STT_CFG) if isinstance(m.STT_CFG, dict) else {}
+m.STT_CFG = {"command": sys.executable + ' -c "import sys;print(\'transcribed hello\')"',
+             "timeout": 30}
+text_out, stt_err = m.transcribe_attachment(ogg)
+check("configured command transcribes", (stt_err, text_out), (None, "transcribed hello"))
+
+m.STT_CFG = {"command": "", "timeout": 30}
+_, stt_err = m.transcribe_attachment(ogg)
+check("empty command explains itself", stt_err is not None and "config" in stt_err, True)
+
+# End to end through dispatch: voice note becomes body text.
+m.STT_CFG = {"command": sys.executable + ' -c "print(\'remind me to test voice\')"',
+             "timeout": 30}
+seen_bodies = []
+_orig_dir_voice = m.CFG.get("attachment_dir")
+m.CFG["attachment_dir"] = _TMP
+
+
+def answer_body_capture(text, notify=None, image_desc="", sources_out=None,
+                        forced_turn=None, doc_context=""):
+    seen_bodies.append(text)
+    return "done"
+
+
+m.answer = answer_body_capture
+m.dispatch("", None, [{"id": "voicenote", "contentType": "audio/ogg"}], [])
+check("transcript became the message body",
+      seen_bodies and "remind me to test voice" in seen_bodies[0], True)
+m.answer = _real_answer
+if _orig_dir_voice is None:
+    del m.CFG["attachment_dir"]
+else:
+    m.CFG["attachment_dir"] = _orig_dir_voice
+m.STT_CFG = _orig_stt
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

@@ -31,6 +31,7 @@ import json
 import os
 import queue as queuelib
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -603,6 +604,9 @@ def cmd_status():
     if benched:
         out += "\nbenched channels: %s" % "; ".join(
             "%s (%s)" % (m, clip(w, 60)) for m, w in benched)
+    ul = usage_line()
+    if ul:
+        out += "\n%s" % ul
     return out
 
 
@@ -703,7 +707,13 @@ def format_queue(pending, header):
         lines.append("")
         lines.append("%s:" % label)
         for n, item in group:
-            lines.append("%d. %s (%s)" % (n, item["text"][:100], _age_label(item.get("ts"))))
+            due = ""
+            if item.get("due"):
+                due_ts = item["due"]
+                due = (" [DUE]" if time.time() >= due_ts
+                       else " [due %s]" % time.strftime("%H:%M", time.localtime(due_ts)))
+            lines.append("%d. %s%s (%s)" % (n, item["text"][:100], due,
+                                            _age_label(item.get("ts"))))
     lines.append("")
     lines.append("reply 'done <number>' to clear one, or 'done all'.")
     return "\n".join(lines)
@@ -846,8 +856,12 @@ def _muted():
 
 def _is_waiting(item):
     """An item the digest should raise. Action items count at once — a benched
-    model is a decision the user is waiting on, not something to age 24h."""
+    model is a decision the user is waiting on, not something to age 24h. A
+    reminder whose time has passed is equally overdue."""
     if item.get("kind") == "action":
+        return True
+    if item.get("due") and (time.time() - item["due"]) > -300:
+        # due now or overdue (5-minute grace so 'at 17:00' isn't nagging at 16:59)
         return True
     return (time.time() - (item.get("ts") or 0)) > 86400
 
@@ -1142,6 +1156,9 @@ def cmd_assistant_state():
     pending = pending_items()
     parts.append("queue: %d open, %d waiting to be raised"
                  % (len(pending), stale_pending_count()))
+    ul = usage_line()
+    if ul:
+        parts.append(ul)
     if _muted():
         parts.append("muted: yes")
     return "\n".join(parts)
@@ -1225,6 +1242,74 @@ def t2_kill(_arg):
     return "command processing DISABLED. delete ~/.config/hongyan/disabled to re-enable"
 
 
+# --------------------------------------------------------------------------
+# Long-term memory. The owner's own facts, in the owner's own file — one
+# line per fact, human-editable, no embeddings. At personal scale a keyword
+# search over a few dozen lines outperforms a vector database and cannot
+# hallucinate one.
+# --------------------------------------------------------------------------
+
+MEMORY_FILE = os.path.join(STATE_DIR, "memory.md")
+MEMORY_INJECT_LINES = 40
+
+
+def load_memory():
+    try:
+        with open(MEMORY_FILE) as fh:
+            return [l.rstrip("\n") for l in fh if l.strip()]
+    except OSError:
+        return []
+
+
+def t2_remember(arg):
+    """Save a durable fact. Owner-only, so T2."""
+    fact = (arg or "").strip().strip("-")
+    if not fact:
+        return "remember what? e.g. 'remember the wifi password is in Bitwarden'"
+    with open(MEMORY_FILE, "a") as fh:
+        fh.write("- %s\n" % fact)
+    audit("memory_saved", clip(fact, 80))
+    return "remembered: %s" % clip(fact, 80)
+
+
+def t2_forget(arg):
+    """Drop matching facts. Owner-only, so T2."""
+    needle = (arg or "").strip().lower()
+    if not needle:
+        lines = load_memory()
+        return ("forget what? %d fact(s) stored; name one." % len(lines)) \
+            if lines else "nothing is remembered yet."
+    lines = load_memory()
+    kept = [l for l in lines if needle not in l.lower()]
+    dropped = len(lines) - len(kept)
+    if not dropped:
+        return "nothing matches '%s'." % clip(needle, 40)
+    tmp = MEMORY_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write("\n".join(kept) + ("\n" if kept else ""))
+    os.replace(tmp, MEMORY_FILE)
+    audit("memory_forgot", "%d x %s" % (dropped, clip(needle, 60)))
+    return "forgot %d fact(s) matching '%s'." % (dropped, clip(needle, 40))
+
+
+def memory_block():
+    """The injected form. Newest last; capped so a growing file can never eat
+    the prompt — overflow drops the OLDEST facts, which is also the honest
+    signal that it is time to prune by hand."""
+    lines = load_memory()[-MEMORY_INJECT_LINES:]
+    if not lines:
+        return ""
+    return ("\n\nWHAT YOU REMEMBER (facts the owner saved; treat as true "
+            "unless contradicted):\n%s\n" % "\n".join(lines))
+
+
+def cmd_memory():
+    lines = load_memory()
+    if not lines:
+        return "nothing remembered yet — 'remember <fact>' starts the file."
+    return "%d fact(s):\n%s" % (len(lines), "\n".join(lines[-20:]))
+
+
 def t2_use(arg):
     """Put a benched model channel back in service. Owner-only, so T2.
 
@@ -1275,6 +1360,8 @@ T2 = {
     "kill": t2_kill,
     "done": t2_done,
     "use": t2_use,
+    "remember": t2_remember,
+    "forget": t2_forget,
 }
 
 
@@ -1434,6 +1521,38 @@ def attachment_path(att):
         if hits:
             return hits[0]
     return None
+
+
+STT_CFG = CFG.get("stt") or {}
+
+
+def transcribe_attachment(path):
+    """Run the configured STT command against one audio file.
+
+    The command is a fixed string from config with the file path appended —
+    same trust boundary as every other configured command. On-demand by
+    contract: whatever it spawns must exit when it is done, so idle RAM
+    stays at zero.
+    """
+    command = (STT_CFG.get("command") or "").strip()
+    if not command:
+        return None, ("voice notes aren't set up here — add an \"stt\" "
+                      "command to config.json (see hongyan-stt)")
+    if not path or not os.path.exists(path):
+        return None, "the audio file never landed on disk"
+    try:
+        result = subprocess.run(shlex.split(command) + [path],
+                                capture_output=True, text=True,
+                                timeout=int(STT_CFG.get("timeout", 300)))
+    except subprocess.TimeoutExpired:
+        return None, "transcription timed out"
+    except OSError as exc:
+        return None, "transcription command failed: %s" % exc
+    out = (result.stdout or "").strip()
+    if result.returncode != 0 or not out:
+        detail = clip((result.stderr or "").strip(), 100)
+        return None, "transcription failed%s" % ((" — %s" % detail) if detail else "")
+    return out, None
 
 
 def describe_image(text, attachments):
@@ -1603,6 +1722,48 @@ def api_key():
 MODEL_STATE_FILE = os.path.join(STATE_DIR, "model_state.json")
 BENCH_SECONDS = 86400
 
+# Per-day token accounting. The Zen response already carries usage on every
+# call and we were discarding it; against a free-tier cap whose size the
+# provider does not publish, watching consumption is the only early warning
+# there is.
+USAGE_FILE = os.path.join(STATE_DIR, "usage.json")
+
+
+def _record_usage(usage):
+    if not isinstance(usage, dict):
+        return
+    today = _dt.date.today().isoformat()
+    try:
+        with open(USAGE_FILE) as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        state = {}
+    if not isinstance(state, dict) or state.get("date") != today:
+        state = {"date": today, "requests": 0, "prompt": 0,
+                 "completion": 0, "reasoning": 0}
+    details = usage.get("completion_tokens_details") or {}
+    state["requests"] = state.get("requests", 0) + 1
+    state["prompt"] = state.get("prompt", 0) + (usage.get("prompt_tokens") or 0)
+    state["completion"] = state.get("completion", 0) + (usage.get("completion_tokens") or 0)
+    state["reasoning"] = state.get("reasoning", 0) + (details.get("reasoning_tokens") or 0)
+    tmp = USAGE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, USAGE_FILE)
+
+
+def usage_line():
+    try:
+        with open(USAGE_FILE) as fh:
+            state = json.load(fh)
+    except (OSError, ValueError):
+        return ""
+    if state.get("date") != _dt.date.today().isoformat():
+        return ""
+    return ("tokens today: %d in / %d out (%d reasoning) across %d requests"
+            % (state.get("prompt", 0), state.get("completion", 0),
+               state.get("reasoning", 0), state.get("requests", 0)))
+
 
 # --------------------------------------------------------------------------
 # Model chains.
@@ -1718,6 +1879,7 @@ def _request_once(model, messages, max_tokens=None, effort=None):
         return None, "%s %s" % (exc, clip(detail, 200))
     except Exception as exc:  # noqa: BLE001
         return None, str(exc)
+    _record_usage(data.get("usage") or {})
     try:
         content = (data["choices"][0]["message"].get("content") or "").strip()
     except (KeyError, IndexError):
@@ -2245,6 +2407,8 @@ PROBE_REGISTRY = {
     "assistant_state": ("this assistant's own machinery: who owns the monthly review, "
                         "whether one is due or offered, benched model channels, queue counts",
                         "__assistant__"),
+    "memory": ("the durable facts the owner has asked to be remembered",
+               "__memory__"),
     # `ch` is not in the docker group and sudo wants a password, so container
     # stats come from cgroups instead, labelled by each container's main
     # process name (Bitwarden's stack shows up as Api/Identity/sqlservr).
@@ -2295,6 +2459,8 @@ def run_probe(name):
         return cmd_code()
     if cmd == "__assistant__":
         return cmd_assistant_state()
+    if cmd == "__memory__":
+        return cmd_memory()
     if cmd == "__boot__":
         return cmd_boot()
     if cmd == "__service_times__":
@@ -2889,7 +3055,8 @@ def gather(text, prior, image_desc, notify, sources, effort=None):
     return context, False
 
 
-def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None):
+def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None,
+           doc_context=""):
     # Route first: a new topic must not inherit a stale thread, and a follow-up
     # is meaningless without one. route() returns a standalone rewrite that
     # often drops injected image context, so we re-inject the image description
@@ -2954,6 +3121,8 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
 
     if image_desc:
         context.insert(0, "[the image the user attached]\n%s" % image_desc)
+    if doc_context:
+        context.insert(0, "[the document the user attached]\n%s" % doc_context)
 
     # State plainly what was consulted. Without this the model guessed, and told
     # the user it had "checked sources and cited them" when it had not.
@@ -2969,6 +3138,7 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     system = (
         IDENTITY +
         (soul_block() if inject_soul else "") +
+        memory_block() +
         "Answer in plain text, no markdown, at most 3 sentences unless the question truly "
         "needs more.\n"
         "Answer from the context below when it is relevant, otherwise from your own "
@@ -3008,12 +3178,57 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None)
     return out
 
 
+def parse_due(text, now=None):
+    """A due timestamp from natural phrasing, or None.
+
+    Deliberately small: 'at 5', 'at 17:30', 'at 9pm', 'tomorrow', 'in N
+    minutes/hours/days'. Anything unparsed simply stays an ordinary undated
+    note — a missed guess must never silently misplace a reminder.
+    """
+    now = now or time.time()
+    base = _dt.datetime.fromtimestamp(now)
+    text = str(text or "").lower()
+
+    m = re.search(r"\bin\s+(\d+)\s*(minute|min|hour|hr|day)s?\b", text)
+    if m:
+        n = int(m.group(1))
+        unit = m.group(2)
+        secs = n * {"min": 60, "minute": 60, "hour": 3600, "hr": 3600,
+                    "day": 86400}[unit]
+        return now + secs
+
+    m = re.search(r"\bat\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", text)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        ampm = m.group(3)
+        if ampm == "pm" and hour < 12:
+            hour += 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        due = base.replace(hour=hour, minute=minute, second=0)
+        if due.timestamp() <= now:          # a time already past means tomorrow
+            due += _dt.timedelta(days=1)
+        return due.timestamp()
+
+    if re.search(r"\btomorrow\b", text):
+        due = base.replace(hour=9, minute=0, second=0) + _dt.timedelta(days=1)
+        return due.timestamp()
+    return None
+
+
 def queue_note(text):
     kind = "reminder" if REMINDER_RE.match(text or "") else "freetext"
+    entry = {"ts": time.time(), "text": text, "kind": kind,
+             "done": False}
+    due = parse_due(text)
+    if due:
+        entry["due"] = due
     with open(QUEUE_FILE, "a") as fh:
-        fh.write(json.dumps({"ts": time.time(), "text": text, "kind": kind,
-                             "done": False}) + "\n")
-    audit("queued_kind", kind)
+        fh.write(json.dumps(entry) + "\n")
+    audit("queued_kind", kind + ("+due" if due else ""))
     if kind == "reminder":
         # Say what happens next. "queued for Claude" gave no hint that anything
         # would ever resurface, and nothing did. Nothing arrives unasked: it
@@ -3059,6 +3274,84 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
         audit("queued", "quoted | %s" % clip(text))
         return queue_note(text)
 
+    # Voice before everything: a voice note is a body you haven't read yet.
+    if attachments:
+        audio = [a for a in attachments if (a.get("contentType") or "").lower()
+                 .startswith(("audio/", "video/"))]
+        if audio:
+            transcripts = []
+            for att in audio:
+                path = attachment_path(att)
+                transcript, stt_err = transcribe_attachment(path)
+                if stt_err:
+                    audit_fail("stt", clip(stt_err, 90))
+                    return ("I couldn't transcribe that voice note: %s" % stt_err)
+                transcripts.append(transcript)
+            audit("stt_ok", "n=%d chars=%d" % (
+                len(transcripts), sum(len(t) for t in transcripts)))
+            text = ((text.strip() + "\n" if text.strip() else "")
+                    + "\n".join(transcripts)).strip()
+            attachments = [a for a in attachments if a not in audio]
+            if not attachments:
+                # Pure voice note: from here it is just a text message.
+                cmd, arg = match_exact(text)
+                if cmd:
+                    audit("exact", "%s | %s" % (cmd, clip(text)))
+                    return T1[cmd]() if cmd in T1 else T2[cmd](arg)
+                ans = answer(text, notify, "", sources_out,
+                             forced_turn=forced_turn)
+                if ans:
+                    audit("answered", clip(text))
+                    return ans
+                audit("queued", clip(text))
+                return queue_note(text)
+
+    # Documents before images: PDFs and text files are read locally (no
+    # model needed for extraction) and handed to the answer as context.
+    doc_context = ""
+    if attachments:
+        docs = []
+        rest = []
+        for att in attachments:
+            ctype = (att.get("contentType") or "").lower()
+            path = attachment_path(att)
+            extracted = None
+            if path and "pdf" in ctype:
+                out = sh('pdftotext "%s" - 2>/dev/null' % path, 30)
+                if out.strip():
+                    # korvin's research-compressor cap: extraction can yield
+                    # megabytes; the model needs the first honest slice only.
+                    extracted = "PDF %s:\n%s" % (
+                        os.path.basename(path), clip(out, 8000))
+            elif path and (ctype.startswith("text/") or
+                           ctype in ("application/json", "text")):
+                try:
+                    with open(path, errors="replace") as fh:
+                        extracted = "%s:\n%s" % (os.path.basename(path),
+                                                 clip(fh.read(), 8000))
+                except OSError:
+                    extracted = None
+            if extracted:
+                docs.append(extracted)
+            else:
+                rest.append(att)
+        if docs and not rest:
+            # Documents alone are their own pipeline — no commands, no vision.
+            doc_context = "\n\n".join(docs)
+            audit("doc_ok", "n=%d chars=%d" % (len(docs), len(doc_context)))
+            question = text.strip() or "Summarize this document."
+            ans = answer(question, notify, "", sources_out,
+                         forced_turn=forced_turn, doc_context=doc_context)
+            if ans:
+                audit("answered", "doc | %s" % clip(text))
+                return ans
+            audit("queued", "doc | %s" % clip(text))
+            return queue_note(text)
+        elif docs:
+            doc_context = "\n\n".join(docs)
+            audit("doc_ok", "n=%d chars=%d" % (len(docs), len(doc_context)))
+        attachments = rest
+
     # Images run vision FIRST, then feed the normal pipeline, so a photo plus a
     # question ("how much is this worth?") gets both a look and a search.
     image_desc = ""
@@ -3083,12 +3376,14 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
         # Only pass image_desc into answer() if it has real content
         if image_desc and image_desc.strip():
             return answer(text, notify, image_desc, sources_out,
-                          forced_turn=forced_turn) or queue_note(text)
+                          forced_turn=forced_turn,
+                          doc_context=doc_context) or queue_note(text)
         # Reaching here means vision reported success but produced nothing, so
         # the question is about to be answered blind. Say so in the log.
         audit_fail("vision_empty", "n=%d | answering without the image" % len(attachments))
         return answer(text, notify, "", sources_out,
-                      forced_turn=forced_turn) or queue_note(text)
+                      forced_turn=forced_turn,
+                      doc_context=doc_context) or queue_note(text)
 
     cmd, arg = match_exact(text)
     if cmd:
@@ -3112,7 +3407,7 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
     # select several probes, a site read and a web search, so it subsumes the
     # old single-command classifier, which used to intercept questions like
     # "what's using the most memory" with an unrelated canned dump.
-    ans = answer(text, notify, "", sources_out)
+    ans = answer(text, notify, "", sources_out, doc_context=doc_context)
     if ans:
         audit("answered", clip(text))
         return ans
