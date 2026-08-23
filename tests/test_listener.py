@@ -1144,6 +1144,33 @@ else:
 m.STT_CFG = _orig_stt
 
 
+# ------------------------------------------------------ typing discipline ----
+section("typing indicator: honest on both ends")
+
+calls = []
+
+
+class FakeTypingClient:
+    def send_typing(self, to, stop=False):
+        calls.append("stop" if stop else "dots")
+
+
+# Canned-speed work: nothing shows at all except the guaranteed stop.
+calls.clear()
+with m.TypingIndicator(FakeTypingClient(), "+x", initial_delay=0.2,
+                       refresh=0.05):
+    time.sleep(0.05)  # finishes inside the blind window
+check("fast reply shows no dots", calls, ["stop"])
+
+# Long work: refreshes run, and the stop is the LAST frame.
+calls.clear()
+with m.TypingIndicator(FakeTypingClient(), "+x", initial_delay=0.02,
+                       refresh=0.03):
+    time.sleep(0.11)
+check("long work refreshed", calls.count("dots") >= 2, True)
+check("stop is the final frame, never a resurrected dot", calls[-1], "stop")
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

@@ -3423,6 +3423,44 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
 RPC_RESULT_TIMEOUT = 15
 
 
+class TypingIndicator:
+    """The one typing discipline, shared by every site that shows dots.
+
+    Contract: dots mean a message is genuinely being worked on — nothing
+    shows for `initial_delay` (canned replies finish inside it and never
+    flash), refreshes keep long work looking alive past Signal's own
+    expiry, and the STOP frame is sent by the same thread that refreshed,
+    so a refresh can never land after it and resurrect dots nothing will
+    clear. Use as a context manager around any block whose duration the
+    owner will experience as waiting.
+    """
+
+    def __init__(self, client, recipient, initial_delay=3.0, refresh=10.0):
+        self.client = client
+        self.recipient = recipient
+        self.initial_delay = initial_delay
+        self.refresh = refresh
+        self._done = threading.Event()
+        self._thread = None
+
+    def _run(self):
+        delay = self.initial_delay
+        while not self._done.wait(delay):
+            self.client.send_typing(self.recipient)
+            delay = self.refresh
+        self.client.send_typing(self.recipient, stop=True)
+
+    def __enter__(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._done.set()
+        self._thread.join(timeout=2)
+        return False
+
+
 class Client:
     def __init__(self, path):
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -3709,34 +3747,20 @@ def main():
         # This exchange already carries an offer outcome; it gets no second one.
         offer_exchange = bool(verdict or explicit_review)
 
-        # 6. Handle it, showing a typing indicator while real work runs.
-        #    Signal expires typing after 15s, so refresh until done — a slow
-        #    answer reads as thinking rather than as a hang.
-        #
-        #    Two disciplines keep the dots honest. First, nothing shows for
-        #    three seconds: canned replies (refusals, confirmations, 'done 2')
-        #    finish inside that window and never flash an indicator at all —
-        #    dots must mean a message is genuinely forthcoming. Second, the
-        #    STOP frame is sent by this same thread after done is set: one
-        #    sender means a refresh can never land after the stop and
-        #    resurrect dots that nothing will then clear (the bug behind the
-        #    lingering '...' after instant auto-replies).
-        done = threading.Event()
-
-        def keep_typing():
-            delay = 3
-            while not done.wait(delay):
-                client.send_typing(CFG["owner_number"])
-                delay = 10
-            client.send_typing(CFG["owner_number"], stop=True)
-
-        typer = threading.Thread(target=keep_typing, daemon=True)
-        typer.start()
+        # 6. Handle it under the one typing discipline (see TypingIndicator):
+        #    no dots for canned-speed answers, refreshes for long ones, a
+        #    guaranteed stop from the same sender that refreshed.
 
         # Progress notices ("searching: ...", "reading X...") are real messages
         # in the thread and the user quoted one — but they were never recorded,
         # so the quote could not resolve to the turn that produced it. Track
         # their timestamps and file them under this turn.
+        # The indicator spans quote resolution through dispatch — too long a
+        # block for a with-statement without reindenting half of main(), so
+        # the enter/exit pair stays explicit here.
+        typing = TypingIndicator(client, CFG["owner_number"])
+        typing.__enter__()
+
         notice_ts = []
 
         def notify(msg):
@@ -3784,10 +3808,8 @@ def main():
             audit_fail("error", str(exc)[:200])
             reply = "handler error: %s" % str(exc)[:120]
         finally:
-            done.set()
-            # Let the typer thread flush its stop frame before the reply goes
-            # out, so the reply never arrives while dots are still showing.
-            typer.join(timeout=2)
+            typing.__exit__()
+
 
         if reply:
             if prefix:
@@ -3837,7 +3859,10 @@ def main():
             # next message the owner sent is what makes this run, so it
             # stays downstream of a human like everything else.
             if not _muted():
-                deliver_deferred_images(client)
+                # A deferred description is real waiting too; it gets the same
+                # dots as everything else instead of a silent gap.
+                with TypingIndicator(client, CFG["owner_number"]):
+                    deliver_deferred_images(client)
 
 
 if __name__ == "__main__":
