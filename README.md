@@ -155,6 +155,8 @@ The installer offers a cron line running `hongyan-autoupdate` every 15 minutes. 
 
 Silence is deliberate. Success changes nothing you need to know mid-conversation, and every outbound message must be downstream of one you sent; the current commit shows up in `status` and `about`. The established exception is failures — unreachable GitHub, a diverged checkout that needs a human, a rolled-back update, or a listener that will not come back up alert you over Signal at once. A dirty working tree is skipped, never clobbered. Remove the cron line to opt out entirely.
 
+The updater is also owner-facing: text `update` to check GitHub and apply immediately (same test gate), and `rollback` to revert one commit and restart — one-word recovery without SSH. Both refuse to run on a dirty checkout.
+
 ### One device or two
 
 **One device** is the default: everything runs on the server, including a monthly self-review that summarises the defects it logged that month — counted by kind, so a recurring fault stands out from a one-off. It reads its own log and nothing else, unless you opt into `roster_check`. The review is never sent on a schedule: it is offered after your next message and delivered only when you reply yes. Nothing else is required.

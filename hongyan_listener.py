@@ -1311,6 +1311,59 @@ def cmd_memory():
     return "%d fact(s):\n%s" % (len(lines), "\n".join(lines[-20:]))
 
 
+def t2_update(_arg):
+    """Check GitHub for a newer commit; apply it if one exists. Owner-only.
+
+    The check is synchronous (fast, read-only) so the reply can say something
+    true; the apply is the standard auto-updater spawned detached — it pulls,
+    re-runs tests, and restarts this listener only on green, draining this
+    process gracefully like any cron-driven update.
+    """
+    q = '"' + REPO_DIR + '"'
+    if sh("git -C %s status --porcelain" % q).strip():
+        return "refused: the checkout has local changes — clean them first."
+    sh("git -C %s fetch origin main" % q, 30)
+    head = sh("git -C %s rev-parse --short HEAD" % q, 10)
+    origin = sh("git -C %s rev-parse --short origin/main" % q, 10)
+    if not origin:
+        return "could not reach GitHub to check."
+    if head == origin:
+        return "already current (%s)." % head
+    subprocess.Popen(
+        ["setsid", "bash", "-c",
+         "exec $HOME/.local/bin/hongyan-autoupdate >> %s 2>&1" % UPDATE_LOG],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    audit("update_requested", "%s -> %s" % (head, origin))
+    return ("updating %s -> %s after this reply (tests gate the restart)."
+            % (head, origin))
+
+
+def t2_rollback(_arg):
+    """Revert to the previous commit and restart. The one-word recovery when
+    an update turns out bad in ways the test suite did not predict."""
+    q = '"' + REPO_DIR + '"'
+    if sh("git -C %s status --porcelain" % q).strip():
+        return "refused: the checkout has local changes."
+    prev = sh("git -C %s rev-parse --short HEAD" % q, 10)
+    sh("git -C %s reset --hard HEAD~1" % q, 15)
+    cur = sh("git -C %s log --oneline -1" % q, 10)
+    if not cur or (prev and cur.startswith(prev)):
+        return "rollback failed — nothing changed; needs hands."
+    audit("rollback", clip(cur, 100))
+    # Restart from outside: detach a supervisor chain that drains this
+    # process exactly the way the auto-updater does.
+    pid = os.getpid()
+    subprocess.Popen(
+        ["setsid", "bash", "-c",
+         'sleep 2; kill %d 2>/dev/null; for i in $(seq 1 25); do '
+         '[ -d /proc/%d ] || break; sleep 1; done; '
+         "exec $HOME/.local/bin/hongyan-supervise" % (pid, pid)],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return "rolled back to %s — restarting now." % clip(cur, 60)
+
+
 def t2_use(arg):
     """Put a benched model channel back in service. Owner-only, so T2.
 
@@ -1361,6 +1414,8 @@ T2 = {
     "kill": t2_kill,
     "done": t2_done,
     "use": t2_use,
+    "update": t2_update,
+    "rollback": t2_rollback,
     "remember": t2_remember,
     "forget": t2_forget,
 }

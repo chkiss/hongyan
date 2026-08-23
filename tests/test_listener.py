@@ -1267,6 +1267,50 @@ check("poisoned search cannot unbalance the frame",
 check("injected SYSTEM line stays inside as data", "obey me now" in block, True)
 
 
+# ------------------------------------------------ typed update / rollback ----
+section("typed update and rollback")
+
+_seq = {}
+
+
+def fake_git_sh(cmd, timeout=10):
+    for key, val in _seq.items():
+        if key in cmd:
+            return val
+    return ""
+
+
+_real_sh = m.sh
+m.sh = fake_git_sh
+
+_seq.update({"status --porcelain": "", "fetch origin main": "",
+             "rev-parse --short HEAD": "aaa1111",
+             "rev-parse --short origin/main": "aaa1111"})
+check("update: current reports so", m.t2_update(None).startswith("already current"), True)
+
+_seq["rev-parse --short origin/main"] = "bbb2222"
+_spawned = []
+_real_popen = m.subprocess.Popen
+m.subprocess.Popen = lambda *a, **k: _spawned.append(a) or type("P", (), {"pid": 1})()
+reply = m.t2_update(None)
+check("update behind offers to apply", reply.startswith("updating aaa1111 -> bbb2222"), True)
+check("apply is detached autoupdate", any("hongyan-autoupdate" in str(a[0]) for a in _spawned), True)
+
+_seq["status --porcelain"] = " M something"
+check("dirty tree refused", m.t2_update(None).startswith("refused:"), True)
+_seq["status --porcelain"] = ""
+
+# rollback verifies by result, not by trusting reset's output
+_seq.update({"status --porcelain": "", "rev-parse --short HEAD": "bbb2222",
+             "log --oneline -1": "aaa1111 earlier commit"})
+reply = m.t2_rollback(None)
+check("rollback reverts and restarts", reply.startswith("rolled back to aaa1111"), True)
+check("rollback restarts via drain chain",
+      any("hongyan-supervise" in str(a[0][-1]) for a in _spawned if len(a[0]) > 2), True)
+m.subprocess.Popen = _real_popen
+m.sh = _real_sh
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 
