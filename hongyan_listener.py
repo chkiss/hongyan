@@ -3709,16 +3709,27 @@ def main():
         # This exchange already carries an offer outcome; it gets no second one.
         offer_exchange = bool(verdict or explicit_review)
 
-        # 6. Handle it, showing a typing indicator throughout. Signal expires
-        #    typing after 15s, so refresh until the work finishes — a slow
-        #    answer then reads as thinking rather than as a hang.
+        # 6. Handle it, showing a typing indicator while real work runs.
+        #    Signal expires typing after 15s, so refresh until done — a slow
+        #    answer reads as thinking rather than as a hang.
+        #
+        #    Two disciplines keep the dots honest. First, nothing shows for
+        #    three seconds: canned replies (refusals, confirmations, 'done 2')
+        #    finish inside that window and never flash an indicator at all —
+        #    dots must mean a message is genuinely forthcoming. Second, the
+        #    STOP frame is sent by this same thread after done is set: one
+        #    sender means a refresh can never land after the stop and
+        #    resurrect dots that nothing will then clear (the bug behind the
+        #    lingering '...' after instant auto-replies).
         done = threading.Event()
 
         def keep_typing():
-            while not done.wait(10):
+            delay = 3
+            while not done.wait(delay):
                 client.send_typing(CFG["owner_number"])
+                delay = 10
+            client.send_typing(CFG["owner_number"], stop=True)
 
-        client.send_typing(CFG["owner_number"])
         typer = threading.Thread(target=keep_typing, daemon=True)
         typer.start()
 
@@ -3774,7 +3785,9 @@ def main():
             reply = "handler error: %s" % str(exc)[:120]
         finally:
             done.set()
-            client.send_typing(CFG["owner_number"], stop=True)
+            # Let the typer thread flush its stop frame before the reply goes
+            # out, so the reply never arrives while dots are still showing.
+            typer.join(timeout=2)
 
         if reply:
             if prefix:
