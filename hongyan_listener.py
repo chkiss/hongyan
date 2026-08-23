@@ -2437,8 +2437,12 @@ PROBE_REGISTRY = {
     "cron_jobs": ("the scheduled job list", "crontab -l | grep -vE '^#' | grep -c ."),
     # Count only, never message text: journal lines can contain usernames, IPs
     # and auth failures, and this data is shown to a third-party model.
-    "error_count": ("number of journal errors in the last 24h",
-                    "journalctl -p err --since '24 hours ago' --no-pager 2>/dev/null | wc -l"),
+    # Pre-auth sshd scanner resets are background radiation, not server errors
+    # (2026-08-23: they were 10 of 14 lines and read as a phantom incident).
+    "error_count": ("number of journal errors in the last 24h, excluding sshd scanner noise",
+                    "journalctl -p err --since '24 hours ago' --no-pager 2>/dev/null "
+                    "| grep -vE 'sshd.*(kex_exchange_identification|Did not receive identification|Connection (reset|closed) by)' "
+                    "| wc -l"),
     "biggest_dirs": ("largest directories under home, names and sizes only",
                      "du -xh --max-depth=1 %s 2>/dev/null | sort -rh | head -8" % HOME_DIR),
     "ip": ("hostname and IP addresses", "__ip__"),
