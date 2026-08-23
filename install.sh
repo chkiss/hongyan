@@ -123,7 +123,7 @@ install_server() {
 
     say "Linking commands into $BIN"
     local f
-    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-autoupdate hongyan-send.py hongyan-me; do
+    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-autoupdate hongyan-send.py hongyan-me hongyan-monthly-review hongyan-stt; do
         [ -e "$REPO/$f" ] || continue
         if [ -e "$BIN/$f" ] && [ ! -L "$BIN/$f" ]; then
             mv "$BIN/$f" "$BIN/$f.pre-install"
