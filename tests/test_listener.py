@@ -958,6 +958,66 @@ check("overflow still announces itself",
       parts[-1].endswith("[…truncated — ask for the rest]"), True)
 
 
+# ------------------------------------------------ deferred images ------------
+section("a photo from the dead zone gets its moment back")
+
+img = os.path.join(_TMP, "defer-test.jpg")
+with open(img, "wb") as fh:
+    fh.write(b"\xff\xd8" + b"0" * 32)
+att = [{"id": "defer-test", "contentType": "image/jpeg"}]
+_orig_dir = m.CFG.get("attachment_dir")
+m.CFG["attachment_dir"] = _TMP
+
+_real_mc_defer = m.model_call
+m.model_call = lambda *a, **k: None  # every channel down
+desc, err = m.describe_image("what is this?", att)
+check("exhaustion is flagged as deferrable",
+      m.describe_image.last_was_exhausted, True)
+check("the reply promises the follow-up", "next reply" in err, True)
+
+m.stash_deferred_images(att, "what is this?")
+check("attachment stashed with its caption",
+      len(m._load_pending_images()) == 1
+      and m._load_pending_images()[0]["caption"] == "what is this?", True)
+
+sent_texts = []
+
+
+class FakeClient:
+    def send_message(self, to, text):
+        sent_texts.append(text)
+        return 1
+
+
+m.model_call = lambda *a, **k: "a red bicycle"  # recovered
+check("recovery delivers the description",
+      m.deliver_deferred_images(FakeClient()), True)
+check("entry consumed on delivery", m._load_pending_images(), [])
+check("delivery names the older photo",
+      sent_texts and sent_texts[0].startswith("About the photo") and
+      "bicycle" in sent_texts[0], True)
+
+# A stash pointing at a pruned file drops without ceremony.
+m._save_pending_images([{"path": "/gone.jpg", "caption": "", "ts": time.time(),
+                         "tries": 0}])
+check("pruned attachment dropped silently",
+      (m.deliver_deferred_images(FakeClient()), m._load_pending_images()),
+      (False, []))
+
+# Older than the TTL: same.
+m._save_pending_images([{"path": img, "caption": "", "ts": time.time() - m.DEFERRED_IMAGE_TTL - 10,
+                         "tries": 0}])
+check("expired stash dropped silently",
+      (m.deliver_deferred_images(FakeClient()), m._load_pending_images()),
+      (False, []))
+
+m.model_call = _real_mc_defer
+if _orig_dir is None:
+    del m.CFG["attachment_dir"]
+else:
+    m.CFG["attachment_dir"] = _orig_dir
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 

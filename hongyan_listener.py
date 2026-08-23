@@ -1437,7 +1437,14 @@ def attachment_path(att):
 
 
 def describe_image(text, attachments):
-    """Return (description, error). error is None on success."""
+    """Return (description, error). error is None on success.
+
+    last_was_exhausted: True only when the whole vision chain failed on a
+    recoverable-looking attempt — the caller stashes the attachment for a
+    retry on the next message. Other errors (no model configured, missing
+    file, non-image) will not heal with time and are never deferred.
+    """
+    describe_image.last_was_exhausted = False
     if not attachments:
         return "", None
     vision = chain_for("vision")
@@ -1479,9 +1486,12 @@ def describe_image(text, attachments):
         ]
         desc = model_call("vision", messages)  # no cap — lets the model reason fully
         if desc is None:
+            describe_image.last_was_exhausted = True
             return "", ("the vision chain could not describe that image (%s) — "
-                        "I can still answer from your message alone."
+                        "I can still answer from your message alone. I'll describe "
+                        "it with my next reply once the image models recover."
                         % " -> ".join(vision))
+        describe_image.last_was_exhausted = False
         descriptions.append(desc.strip())
     if not descriptions:
         if skipped:
@@ -1498,6 +1508,86 @@ def describe_image(text, attachments):
         joined += "\n(%s attachment not looked at — I can only look at images.)" \
             % ", ".join(sorted(set(skipped)))
     return joined, None
+
+
+# Initialised here, after the def: function attributes need the function.
+describe_image.last_was_exhausted = False
+
+
+# --------------------------------------------------------------------------
+# Deferred images.
+#
+# When the whole vision chain is down, the photo itself is not lost — only
+# this moment is. The attachment path and caption are stashed, and the next
+# message the owner sends (so: user-caused, pull-only compliant) gets the
+# description as a follow-up once a channel has recovered. Attachments are
+# pruned after 14 days; stashes older than that are dropped rather than
+# described from nothing.
+# --------------------------------------------------------------------------
+
+PENDING_IMAGES_FILE = os.path.join(STATE_DIR, "pending_images.json")
+DEFERRED_IMAGE_TTL = 48 * 3600
+
+
+def _load_pending_images():
+    try:
+        with open(PENDING_IMAGES_FILE) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _save_pending_images(entries):
+    tmp = PENDING_IMAGES_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(entries, fh)
+    os.replace(tmp, PENDING_IMAGES_FILE)
+
+
+def stash_deferred_images(attachments, caption):
+    added = 0
+    entries = _load_pending_images()
+    for att in attachments:
+        path = attachment_path(att)
+        if not path or not os.path.exists(path):
+            continue
+        entries.append({"path": path, "caption": (caption or "")[:400],
+                        "ts": time.time(), "tries": 0})
+        added += 1
+    if added:
+        _save_pending_images(entries)
+        audit("vision_deferred", "n=%d" % added)
+    return added
+
+
+def deliver_deferred_images(client):
+    """Retry stashed photos. True if anything was described and sent."""
+    entries = _load_pending_images()
+    if not entries:
+        return False
+    remaining = []
+    delivered = False
+    for entry in entries:
+        age = time.time() - (entry.get("ts") or 0)
+        if not os.path.exists(entry["path"]) or age > DEFERRED_IMAGE_TTL:
+            continue  # pruned or stale — drop without ceremony
+        att = [{"id": entry["path"], "contentType": "image/jpeg"}]
+        # attachment_path joins dir+id; an absolute id resolves to itself.
+        desc, err = describe_image(entry.get("caption") or "", att)
+        if err or not desc:
+            entry["tries"] = entry.get("tries", 0) + 1
+            remaining.append(entry)
+            continue
+        client.send_message(
+            CFG["owner_number"],
+            "About the photo you sent earlier:\n%s" % desc.strip())
+        delivered = True
+    _save_pending_images(remaining)
+    if delivered:
+        audit("vision_delivered_deferred", "n=%d" % (
+            len(entries) - len(remaining)))
+    return delivered
 
 
 def api_key():
@@ -2981,6 +3071,8 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
             # This path used to return the error to the user and log nothing,
             # so a total failure of image support left no trace in the log.
             audit_fail("vision", "n=%d | %s" % (len(attachments), err[:90]))
+            if describe_image.last_was_exhausted:
+                stash_deferred_images(attachments, text)
             return err
         audit("vision_ok", "n=%d chars=%d" % (len(attachments), len(image_desc)))
         if not text.strip():
@@ -3432,6 +3524,12 @@ def main():
                 }
                 save_offers(offers)
                 audit(which + "_offered", "")
+
+            # A photo whose moment failed gets its moment back here — the
+            # next message the owner sent is what makes this run, so it
+            # stays downstream of a human like everything else.
+            if not _muted():
+                deliver_deferred_images(client)
 
 
 if __name__ == "__main__":
