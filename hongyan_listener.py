@@ -215,7 +215,7 @@ def load_history_full():
 
 
 SEND_CHUNK = 1500
-SEND_MAX_PARTS = 4
+SEND_MAX_PARTS = 6
 
 
 def split_reply(reply, limit=SEND_CHUNK, max_parts=SEND_MAX_PARTS):
@@ -1195,10 +1195,17 @@ def t2_rerun(arg):
 
 def t2_note(arg):
     text = (arg or "").strip()
-    if not text:
-        return "nothing to note"
+    # A bare pronoun has nothing to point at: 'note it' typed exactly queued
+    # the literal word "it", which sat in the queue embarrassing everyone.
+    stripped = re.sub(r"\b(lol|lmao|haha|pls|please)\b", "", text,
+                      flags=re.I).strip(" .!?,-")
+    if not stripped or stripped.lower() in (
+            "it", "this", "that", "them", "these", "those", "the above"):
+        return ("'note' needs the actual thing — e.g. 'note call the vet at 5'. "
+                "Or quote the message and say 'note it'.")
     with open(QUEUE_FILE, "a") as fh:
-        fh.write(json.dumps({"ts": time.time(), "text": text, "kind": "note", "done": False}) + "\n")
+        fh.write(json.dumps({"ts": time.time(), "text": text, "kind": "note",
+                             "done": False}) + "\n")
     return "noted"
 
 
@@ -2925,7 +2932,8 @@ def queue_note(text):
     return "queued — nothing ran. Say 'queue' anytime, or I'll mention it next time we talk."
 
 
-def dispatch(text, notify=None, attachments=None, sources_out=None, forced_turn=None):
+def dispatch(text, notify=None, attachments=None, sources_out=None,
+             forced_turn=None):
     def note_source(s):
         if sources_out is not None:
             sources_out.append(s)
@@ -2934,7 +2942,26 @@ def dispatch(text, notify=None, attachments=None, sources_out=None, forced_turn=
     # fast-path matchers are skipped: "restart it?" quoted onto an earlier
     # thread must be read against that thread, not swallowed by the exact-command
     # matcher. The T2 action path stays reachable only by typing a bare command.
+    #
+    # One exception, learned from 'Note it' queueing the literal word: a
+    # bare capture directive while quoting means "save what I'm pointing
+    # at". Sending that through the model produced mangled meta-questions
+    # ('would you note the item that was the subject of...') and queued
+    # THOSE. The quoted turn's own text is what gets saved.
     if forced_turn is not None and not attachments:
+        capture = re.fullmatch(
+            r"\s*(?:please\s+)?(?:note|queue|save|remember|keep)\s*"
+            r"(?:this|that|it)?\s*[.!]?\s*", text or "", re.I)
+        if capture:
+            gist = (forced_turn.get("assistant")
+                    or forced_turn.get("user") or "").strip()
+            with open(QUEUE_FILE, "a") as fh:
+                fh.write(json.dumps({"ts": time.time(), "text": gist[:400],
+                                     "kind": "note", "done": False}) + "\n")
+            audit("queued", "quoted-capture | %s" % clip(gist, 80))
+            shown = gist[:80] + ("…" if len(gist) > 80 else "")
+            return ("noted: “%s”" % shown) if gist else \
+                "that thread has no text left to save."
         ans = answer(text, notify, "", sources_out, forced_turn=forced_turn)
         if ans:
             audit("answered", "quoted | %s" % clip(text))

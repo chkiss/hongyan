@@ -931,6 +931,33 @@ for t in ("my hard drive failed", "the quick brown fox", "thinking about you"):
           (not m._USER_EFFORT_HIGH_RE.search(t))
           and (not m._USER_EFFORT_LOW_RE.search(t)), True)
 
+# ------------------------------------------------ quoted capture directives ---
+section("'note it' while quoting saves what is pointed at")
+
+open(m.QUEUE_FILE, "w").close()
+_turn = {"user": "how much is this worth?",
+         "assistant": "A Lego 42096 sells used around £90-120.",
+         "reply_ts": [1], "ts": 0}
+reply = m.dispatch("Note it", None, None, [], forced_turn=_turn)
+check("directive confirms with the gist", reply.startswith("noted:"), True)
+items = [i for i in m.load_queue() if not i.get("done")]
+check("the QUOTED text was queued, not the directive",
+      len(items) == 1 and "Lego" in items[0]["text"], True)
+
+check("bare 'it' refuses to queue",
+      m.t2_note("it").startswith("'note' needs the actual thing"), True)
+check("'it lol' refuses too", m.t2_note("it lol").startswith("'note'"), True)
+check("a real note still lands", m.t2_note("call the vet at 5") == "noted", True)
+m.t2_done("all")
+
+# The truncation the owner actually hit: caps raised, marker still last resort.
+parts = m.split_reply("\n\n".join("para %d %s" % (n, "x" * 400)
+                                  for n in range(24)))
+check("long replies get up to six parts", len(parts) == 6, True)
+check("overflow still announces itself",
+      parts[-1].endswith("[…truncated — ask for the rest]"), True)
+
+
 # ------------------------------------------------------------- cli flags ---
 section("unknown cli flag dies")
 
