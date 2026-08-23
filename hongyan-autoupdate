@@ -88,7 +88,14 @@ fi
 LISTENER_PID="$DIR/listener.pid"
 if [ -f "$LISTENER_PID" ]; then
     kill "$(cat "$LISTENER_PID")" 2>/dev/null
-    sleep 1
+    # The listener drains gracefully now — it finishes the message in flight
+    # before exiting, so a model call already paid for is not wasted. Give it
+    # the time it asked for; supervise would otherwise see the old pid still
+    # alive and skip starting a replacement.
+    for _ in $(seq 1 25); do
+        hongyan_alive "$LISTENER_PID" "hongyan_listener" || break
+        sleep 1
+    done
 fi
 "$HOME/.local/bin/hongyan-supervise" 9>&-
 sleep 3
