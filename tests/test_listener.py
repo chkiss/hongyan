@@ -1172,10 +1172,11 @@ check("stop is the final frame, never a resurrected dot", calls[-1], "stop")
 
 
 # ------------------------------------------------- benchmark adoptions -------
-section("reconnect with backoff")
+section("socket loss is fatal: the watchdog owns fresh clients")
 
-# Scripted client: first life yields one line then dies; the supervisor
-# reconnects and the second life serves. Zero backoff keeps the test fast.
+# Scripted client: first life yields one line then dies. The listener must
+# EXIT (SystemExit) rather than reconnect in place — the in-place lifecycle
+# correlated with the daemon's upstream receive silently wedging.
 c = m.Client.__new__(m.Client)
 c.path = "/nonexistent"
 c.buf = b""
@@ -1184,8 +1185,7 @@ import threading as _th
 c.lock = _th.Lock()
 c.pending = {}
 c.inbox = m.queuelib.Queue()
-attempts = {"n": 0}
-lives = [["hello from life 1", None], ["hello from life 2", None]]
+lives = [["hello from life 1", None]]
 
 
 def fake_read_loop(self):
@@ -1195,23 +1195,15 @@ def fake_read_loop(self):
 
 c._read_loop = fake_read_loop.__get__(c, m.Client)
 
-
-def fake_connect(self):
-    attempts["n"] += 1
-    self.sock = True
-
-
-c._connect = fake_connect.__get__(c, m.Client)
-c.RECONNECT_MIN = 0
-c.RECONNECT_MAX = 0
-
 got = []
-gen = c.lines()
-got.append(next(gen))
+exited = None
+try:
+    for line in c.lines():
+        got.append(line)
+except SystemExit as exc:
+    exited = exc.code
 check("first life yields its line", got[0], "hello from life 1")
-got.append(next(gen))
-check("second life served after reconnect", got[1], "hello from life 2")
-check("connected twice for two lives", attempts["n"], 2)
+check("socket death exits the process", exited, 1)
 
 
 section("graceful shutdown")

@@ -3756,36 +3756,23 @@ class Client:
                 slot[0].set()
 
     def lines(self):
-        """Supervisor over the read loop: reconnect with backoff forever.
+        """Yield daemon lines. On socket death, exit the process.
 
-        The reader thread signals death with None; this then flushes any RPC
-        waiters stranded by the dead socket, waits out a doubling backoff,
-        and opens a fresh connection — retrying the connect itself on the
-        same curve, so signal-cli being down for a while costs patience, not
-        messages. Anything buffered before the drop is consumed first.
+        An in-place reconnect-with-backoff supervisor lived here briefly
+        (2026-08-22 batch); its connect/churn lifecycle correlated with the
+        daemon's upstream receive silently wedging — days of inbound silence
+        across two incidents. The old contract is restored: die cleanly, let
+        the watchdog hand signal-cli a fresh client. That costs up to ten
+        minutes of watchdog latency on socket loss; a wedged daemon costs
+        unbounded silence.
         """
-        backoff = self.RECONNECT_MIN
+        threading.Thread(target=self._read_loop, daemon=True).start()
         while True:
-            while True:   # stay here until a connection actually exists
-                try:
-                    self._connect()
-                    break
-                except OSError as exc:
-                    audit_fail("socket_connect_failed", str(exc)[:120])
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, self.RECONNECT_MAX)
-            threading.Thread(target=self._read_loop, daemon=True).start()
-            while True:
-                item = self.inbox.get()
-                if item is None:
-                    break
-                yield item
-            for slot in list(self.pending.values()):
-                slot[0].set()   # stranded senders must not hang their timeout
-            self.pending.clear()
-            audit("socket_reconnect", "backing off %ds" % backoff)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, self.RECONNECT_MAX)
+            item = self.inbox.get()
+            if item is None:
+                audit("listener_exit", "socket lost - clean exit for watchdog restart")
+                sys.exit(1)
+            yield item
 
 
 TRANSPORT = CFG.get("transport", "bot_account")
