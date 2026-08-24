@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+"""hongyan-config — toggle what the hongyan bot may see and touch.
+
+Single-file, stdlib only. Run with no arguments for the interactive menu;
+subcommands for scripting. Every change is written straight into config.json
+(notes preserved) and takes effect when the listener next restarts.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
+IS_WINDOWS = sys.platform.startswith("win")
+
+_USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def _c(code, text):
+    return "\033[%sm%s\033[0m" % (code, text) if _USE_COLOR else text
+
+
+def load():
+    with open(CONFIG_PATH) as fh:
+        return json.load(fh)
+
+
+def save(cfg):
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(cfg, fh, indent=2, ensure_ascii=False)
+    os.replace(tmp, CONFIG_PATH)
+    print("saved %s — restart the listener to apply" % CONFIG_PATH)
+
+
+def rows(cfg):
+    """(key, kind, target, allowed) for everything configured or detected."""
+    out = []
+    for key, spec in (cfg.get("services") or {}).items():
+        if isinstance(spec, dict):
+            kind = spec.get("type", "system")
+            target = spec.get("port") if kind == "port" else spec.get("unit")
+            out.append([key, kind, target or key, key in (cfg.get("allowed_units") or [])])
+        else:
+            out.append([key, spec[0], spec[1], key in (cfg.get("allowed_units") or [])])
+    return out
+
+
+def detect():
+    """Running services worth offering. Same noise filter as the listener."""
+    out = []
+    if IS_WINDOWS:
+        cmd = ("powershell -NoProfile -Command \"Get-Service | Where-Object "
+               "{$_.StartType -eq 'Automatic' -and $_.Status -eq 'Running'} | "
+               "Select-Object -First 20 -ExpandProperty Name\"")
+        for line in subprocess.run(cmd, shell=True, capture_output=True,
+                                   text=True, timeout=30).stdout.splitlines():
+            if line.strip():
+                out.append((line.strip(), "windows", line.strip()))
+        return out
+    noise = re.compile(
+        r"^(systemd|getty|serial-getty|user@|session-|dbus|polkit|accounts-|"
+        r"irqbalance|atd|udisks|upower|cups|ModemManager|NetworkManager|"
+        r"rsyslog|cron|anacron|logrotate|e2scrub|fstrim|man-db|fwupd|"
+        r"packagekit|unattended|qemu|cloud-init|snapd|multipathd|lvm2|"
+        r"open-iscsi|ssh|sshd)")
+    cmd = ("systemctl list-units --type=service --state=running --no-legend "
+           "--plain 2>/dev/null | awk '{print $1}'")
+    for line in subprocess.run(cmd, shell=True, capture_output=True,
+                               text=True, timeout=20).stdout.splitlines():
+        unit = line.strip()
+        if unit.endswith(".service"):
+            unit = unit[:-8]
+        if unit and not noise.match(unit):
+            out.append((unit, "system", unit))
+    cmd = ("systemctl --user list-units --type=service --state=running "
+           "--no-legend --plain 2>/dev/null | awk '{print $1}'")
+    for line in subprocess.run(cmd, shell=True, capture_output=True,
+                               text=True, timeout=20).stdout.splitlines():
+        unit = line.strip()
+        if unit.endswith(".service"):
+            unit = unit[:-8]
+        if unit:
+            out.append((unit, "user", unit))
+    return out[:20]
+
+
+def enable(cfg, key, kind, target):
+    cfg.setdefault("services", {})[key] = {"type": kind, "unit": target}
+    units = cfg.setdefault("allowed_units", [])
+    if key not in units:
+        units.append(key)
+    cfg["onboarding_done"] = True
+
+
+def disable(cfg, key):
+    (cfg.get("services") or {}).pop(key, None)
+    units = cfg.setdefault("allowed_units", [])
+    if key in units:
+        units.remove(key)
+    cfg["onboarding_done"] = True
+
+
+def mark_done(cfg):
+    cfg["onboarding_done"] = True
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+def cli(argv):
+    if argv[:1] == ["path"]:
+        print(CONFIG_PATH)
+        return 0
+    if argv[:1] == ["list"]:
+        cfg = load()
+        print("config: %s" % CONFIG_PATH)
+        for key, kind, target, allowed in rows(cfg):
+            print("  [%s] %-22s %-8s %s" % ("x" if allowed else " ", key, kind, target))
+        return 0
+    if argv[:1] == ["detect"]:
+        for key, kind, target in detect():
+            print("  %-22s %-8s %s" % (key, kind, target))
+        return 0
+    if argv[:1] == ["enable"]:
+        if len(argv) < 2:
+            print("usage: hongyan-config enable NAME [KIND] [TARGET]"); return 2
+        cfg = load()
+        enable(cfg, argv[1], argv[2] if len(argv) > 2 else "system",
+               argv[3] if len(argv) > 3 else argv[1])
+        save(cfg)
+        return 0
+    if argv[:1] == ["disable"]:
+        if len(argv) < 2:
+            print("usage: hongyan-config disable NAME"); return 2
+        cfg = load()
+        disable(cfg, argv[1])
+        save(cfg)
+        return 0
+    print("usage: hongyan-config [list|detect|enable NAME [KIND] [TARGET]|"
+          "disable NAME|path]\nno subcommand starts the interactive menu")
+    return 2
+
+
+# ── TUI ──────────────────────────────────────────────────────────────────────
+def tui():
+    cfg = load()
+    detected = []
+    while True:
+        os.system("cls" if IS_WINDOWS else "clear")
+        print(_c("1", "hongyan — what may the bot see and touch?"))
+        print(_c("3", "config: %s" % CONFIG_PATH))
+        print()
+        table = rows(cfg)
+        for i, (key, kind, target, allowed) in enumerate(table, 1):
+            mark = _c("32", "[x]") if allowed else _c("90", "[ ]")
+            print("  %2d %s %-22s %-8s %s" % (i, mark, key, kind, target))
+        print()
+        print("  <number> toggle    a add detected (%d found)    "
+              "n add by hand    q quit" % len(detected))
+        choice = input("> ").strip().lower()
+        if choice == "q":
+            print("saved changes apply on listener restart"); return
+        if choice == "a":
+            detected = detect()
+            for key, kind, target in detected:
+                enable(cfg, key, kind, target)
+            save(cfg)
+            continue
+        if choice == "n":
+            parts = input("name kind target: ").split()
+            if len(parts) == 3:
+                enable(cfg, parts[0], parts[1], parts[2])
+                save(cfg)
+            continue
+        if choice.isdigit() and 1 <= int(choice) <= len(table):
+            key, kind, target, allowed = table[int(choice) - 1]
+            if allowed:
+                disable(cfg, key)
+            else:
+                enable(cfg, key, kind, target)
+            save(cfg)
+
+
+if __name__ == "__main__":
+    sys.exit(tui() if len(sys.argv) <= 1 else cli(sys.argv[1:]))

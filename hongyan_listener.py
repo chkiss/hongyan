@@ -968,6 +968,108 @@ REVIEW_RUN_RE = re.compile(
     re.I)
 
 
+ONBOARD_FILE = os.path.join(STATE_DIR, "onboarding.json")
+ONBOARD_TTL = 3600   # how long a 'yes' stays answerable after the offer
+
+_ONBOARD_NOISE = re.compile(
+    r"^(systemd|getty|serial-getty|user@|session-|dbus|polkit|accounts-|"
+    r"irqbalance|atd|udisks|upower|cups|ModemManager|NetworkManager|rsyslog|"
+    r"cron|anacron|logrotate|e2scrub|fstrim|man-db|fwupd|packagekit|"
+    r"unattended|qemu|cloud-init|snapd|multipathd|lvm2|open-iscsi|ssh|sshd)")
+
+
+def _onboard_load():
+    try:
+        with open(ONBOARD_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _onboard_save(state):
+    tmp = ONBOARD_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, ONBOARD_FILE)
+
+
+def detect_services():
+    """Running services worth offering on a fresh install, per platform.
+
+    Returns (key, kind, target) tuples. OS-internal noise is filtered; the
+    result is a starting point for the owner to prune, never a finished
+    answer — the consent flow says so explicitly.
+    """
+    out = []
+    if IS_WINDOWS:
+        names = sh("powershell -NoProfile -Command \"Get-Service | "
+                   "Where-Object {$_.StartType -eq 'Automatic' -and "
+                   "$_.Status -eq 'Running'} | Select-Object -First 20 "
+                   "-ExpandProperty Name\"", 25)
+        for line in names.splitlines():
+            name = line.strip()
+            if name:
+                out.append((name, "windows", name))
+        return out
+    lines = sh("systemctl list-units --type=service --state=running "
+               "--no-legend --plain 2>/dev/null | awk '{print $1}'", 15)
+    for line in lines.splitlines():
+        unit = line.strip()
+        if unit.endswith(".service"):
+            unit = unit[:-8]
+        if unit and not _ONBOARD_NOISE.match(unit):
+            out.append((unit, "system", unit))
+    ulines = sh("systemctl --user list-units --type=service --state=running "
+                "--no-legend --plain 2>/dev/null | awk '{print $1}'", 15)
+    for line in ulines.splitlines():
+        unit = line.strip()
+        if unit.endswith(".service"):
+            unit = unit[:-8]
+        if unit:
+            out.append((unit, "user", unit))
+    return out[:20]
+
+
+def onboarding_offer_text():
+    found = detect_services()
+    if not found:
+        return None
+    keys = [k for k, _, _ in found]
+    shown = ", ".join(keys[:10]) + (" …" if len(keys) > 10 else "")
+    return ("One-time setup: I found these services on this box — %s. "
+            "May I watch them and restart them when you ask? "
+            "'yes' accepts all of them, 'no' skips. Either way you can tune "
+            "the list later in %s (or with hongyan-config)." % (shown, CONFIG_PATH))
+
+
+def onboarding_apply(accept):
+    """Apply the consent verdict; returns the reply text."""
+    CFG["onboarding_done"] = True
+    added = []
+    if accept:
+        CFG.setdefault("services", {})
+        CFG.setdefault("allowed_units", [])
+        for key, kind, target in detect_services():
+            CFG["services"].setdefault(key, {"type": kind, "unit": target})
+            if key not in CFG["allowed_units"]:
+                CFG["allowed_units"].append(key)
+            added.append(key)
+        PROBES.clear()
+        PROBES.update(_load_services())
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(CFG, fh, indent=2)
+    os.replace(tmp, CONFIG_PATH)
+    if accept:
+        return ("Done — watching: %s. Say 'status' or 'restart <name>' anytime. "
+                "If you want one out of my reach, remove it from 'services' and "
+                "'allowed_units' in %s — I pick it up on my next restart."
+                % (", ".join(added) or "(nothing found)", CONFIG_PATH))
+    return ("Understood — I won't touch anything. The config lives at %s, and "
+            "hongyan-config is the quickest way to tune it later."
+            % CONFIG_PATH)
+
+
 def outstanding_nudge(offers):
     """An offer sent and still inside its answer window, else None.
 
@@ -3936,6 +4038,31 @@ def main():
         seen["recent"].append(time.time())
         save_seen(seen)
 
+        # 5.55 First-run onboarding: the offer rides the first owner reply;
+        #      bare yes/no on the next message is captured before the nudge
+        #      machinery, exactly like an outstanding review offer would be.
+        onboard = _onboard_load()
+        onboarding_reply = None
+        if not CFG.get("onboarding_done") and not onboard.get("done") \
+                and not CFG.get("services"):
+            if not onboard.get("offered_at"):
+                onboarding_reply = onboarding_offer_text()
+                if onboarding_reply:
+                    onboard["offered_at"] = time.time()
+                    _onboard_save(onboard)
+                else:
+                    onboard["done"] = True
+                    _onboard_save(onboard)
+            elif time.time() - onboard["offered_at"] <= ONBOARD_TTL:
+                ob_verdict = classify_reply(body) if not attachments else None
+                if ob_verdict:
+                    onboarding_reply = onboarding_apply(ob_verdict == "affirm")
+                    onboard["done"] = True
+                    _onboard_save(onboard)
+            else:
+                onboard["done"] = True   # offer expired silently
+                _onboard_save(onboard)
+
         # 5.6 An outstanding offer captures bare yes/no BEFORE anything else
         #     sees them — route() would answer "yes to what?" and the moment
         #     is gone. Quoted replies count too, since answering an offer by
@@ -3990,7 +4117,10 @@ def main():
 
         used = []
         try:
-            if verdict == "affirm":
+            if onboarding_reply is not None:
+                reply = onboarding_reply
+                used.append("server:onboarding")
+            elif verdict == "affirm":
                 reply = deliver_nudge(pending_nudge)
                 used.append("server:review" if pending_nudge == "review"
                             else "server:queue")

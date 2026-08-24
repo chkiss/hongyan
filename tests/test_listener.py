@@ -1329,6 +1329,58 @@ m.sh = _saved_sh
 m.CFG["allowed_units"] = _saved_units
 
 
+section("first-run onboarding")
+
+_tmp_home = tempfile.mkdtemp()
+_saved_cp, _saved_cfg = m.CONFIG_PATH, dict(m.CFG)
+_saved_probes = dict(m.PROBES)
+_saved_sh = m.sh
+m.CONFIG_PATH = os.path.join(_tmp_home, "config.json")
+m.CFG = {"services": {}, "allowed_units": [], "onboarding_done": False,
+         "_note": "keep me"}
+
+
+def fake_onboard_sh(cmd, timeout=25):
+    return ("sshd.service" + chr(10) + "plexmediaserver.service" + chr(10) +
+            "systemd-journald.service" if "--user" not in cmd
+            else "syncthing.service")
+
+
+m.sh = fake_onboard_sh
+found = m.detect_services()
+names = [k for k, _, _ in found]
+check("detect keeps real services", "plexmediaserver" in names, True)
+check("detect filters os noise", "systemd-journald" not in names, True)
+check("detect tags user units",
+      sorted(k for k, kind, _ in found if kind == "user"), ["syncthing"])
+
+reply = m.onboarding_apply(True)
+check("accept lists what it watches", "plexmediaserver" in reply, True)
+written = json.load(open(m.CONFIG_PATH))
+check("accept persists services",
+      written["services"]["plexmediaserver"]["type"], "system")
+check("accept persists allowlist", "plexmediaserver" in written["allowed_units"], True)
+check("accept marks onboarding done", written["onboarding_done"], True)
+check("notes survive the round-trip", written["_note"], "keep me")
+check("probes go live without restart",
+      m.PROBES.get("plexmediaserver"), ("system", "plexmediaserver"))
+
+m.CFG = {"services": {}, "allowed_units": [], "onboarding_done": False}
+reply = m.onboarding_apply(False)
+check("decline changes no services", m.CFG["services"], {})
+check("decline marks onboarding done", m.CFG["onboarding_done"], True)
+check("decline points at the config path", m.CONFIG_PATH in reply, True)
+
+m.PROBES.clear()
+m.PROBES.update(_saved_probes)
+m.sh = _saved_sh
+m.CFG = _saved_cfg
+m.CONFIG_PATH = _saved_cp
+if os.path.exists(os.path.join(_tmp_home, "config.json")):
+    os.remove(os.path.join(_tmp_home, "config.json"))
+shutil.rmtree(_tmp_home, ignore_errors=True)
+
+
 section("unknown cli flag dies")
 
 listener_py = os.path.join(ROOT, "hongyan_listener.py")

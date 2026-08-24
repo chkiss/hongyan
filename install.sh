@@ -121,9 +121,16 @@ install_server() {
         write_config "$review_mode"
     fi
 
+    say "Services"
+    if confirm "Detect running services and pick what hongyan may watch?"; then
+        python3 "$REPO/hongyan-config" || warn "hongyan-config exited with an error — run it later: $BIN/hongyan-config"
+    else
+        info "Run any time: $BIN/hongyan-config"
+    fi
+
     say "Linking commands into $BIN"
     local f
-    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-autoupdate hongyan-send.py hongyan-me hongyan-monthly-review hongyan-stt; do
+    for f in hongyan_listener.py hongyan-lib.sh hongyan-supervise hongyan-watchdog hongyan-autoupdate hongyan-send.py hongyan-me hongyan-monthly-review hongyan-stt hongyan-config; do
         [ -e "$REPO/$f" ] || continue
         if [ -e "$BIN/$f" ] && [ ! -L "$BIN/$f" ]; then
             mv "$BIN/$f" "$BIN/$f.pre-install"

@@ -47,6 +47,16 @@ Copy `config.example.windows.json` to
 - `allowed_units` + `services` — your restartable services. Find Plex's exact
   service name with `powershell Get-Service *plex*`.
 
+## 3.5 Pick what the bot may watch
+
+```
+python hongyan-config
+```
+
+The menu lists every running service it detected; toggle what hongyan may see
+and restart. This marks setup complete, so the bot won't ask again over
+Signal. Re-run it any time — changes apply on listener restart.
+
 ## 4. Run the listener
 
 ```
