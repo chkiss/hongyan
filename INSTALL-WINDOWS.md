@@ -57,16 +57,30 @@ Text it `status`. You should get uptime, disk, memory, failed services.
 
 ## 5. Make it survive reboots (and permit reboots)
 
-Service restarts and `shutdown /r` need elevation. Create two scheduled
-tasks (as Administrator):
+Service restarts and `shutdown /r` need elevation. Create three scheduled
+tasks (as Administrator): the two processes at boot, and a watchdog that
+revives them if they die — which they eventually do.
+
+Copy `windows-watchdog.ps1` to `C:\hongyan\`, edit its three path lines, then:
 
 ```
 schtasks /create /tn "hongyan daemon" /sc onstart /ru YOU /rl HIGHEST /tr "java -jar C:\signal-cli\signal-cli.jar -a +1BOTNUMBER daemon --tcp 127.0.0.1:7583 --receive-mode on-connection --no-receive-stdout"
-schtasks /create /tn "hongyan listener" /sc onstart /ru YOU /rl HIGHEST /tr "python C:\path\to\hongyan_listener.py"
+schtasks /create /tn "hongyan listener" /sc onstart /ru YOU /rl HIGHEST /tr "python C:\hongyan\hongyan_listener.py"
+schtasks /create /tn "hongyan watchdog" /sc minute /mo 5 /ru YOU /rl HIGHEST /tr "powershell -NoProfile -ExecutionPolicy Bypass -File C:\hongyan\windows-watchdog.ps1"
 ```
 
 `/rl HIGHEST` is the piece that makes "restart plex" and "reboot box" actually
-work instead of failing with access denied.
+work instead of failing with access denied. The watchdog checks every 5
+minutes: daemon listening on 7583? listener process alive? Starts whichever
+is missing and logs to `C:\hongyan\watchdog.log`.
+
+## 6. First-run verification checklist
+
+1. Text the bot `status` → reply with uptime, disk, memory, failed services.
+2. Text `restart plex` (after confirming the service name) → reply confirms.
+3. Text `reboot box` → then `abort reboot` within 10 seconds → confirms cancel.
+4. Kill the listener in Task Manager → within 5 minutes the watchdog revives
+   it (watch `C:\hongyan\watchdog.log`) → text again to confirm.
 
 ## What works on Windows vs Linux
 
