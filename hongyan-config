@@ -186,7 +186,7 @@ def tui():
                 mark, key_s = _c("90", "[ ]"), _c("90", key)
             print("  %2d %s %-22s %-8s %s" % (i, mark, key_s, kind, target))
         print()
-        print("  <number> toggle   a scan now (adds new finds, enabled)   "
+        print("  <number> toggle   r refresh (adds new finds, enabled)   "
               "n add by hand")
         print("  s save   q quit without saving")
 
@@ -199,14 +199,14 @@ def tui():
         if choice in ("q", "^c"):
             if dirty and not _confirm_discard():
                 continue
-            print("bye — unsaved changes discarded" if dirty else "bye")
+            print("Bye! Unsaved changes discarded." if dirty else "Bye!")
             return
         if choice == "s":
             apply_state(cfg, known, enabled)
             save(cfg)
             dirty = False
             continue
-        if choice == "a":
+        if choice == "r":
             fresh = 0
             for key, kind, target in detect():
                 if key not in known:
