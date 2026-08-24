@@ -121,8 +121,9 @@ install_server() {
         write_config "$review_mode"
     fi
 
-    say "Services"
-    if confirm "Detect running services and pick what hongyan may watch?"; then
+    say "Hongyan config TUI"
+    info "Services, Signal identity, model API, auto-update — one place."
+    if confirm "Run it now?"; then
         python3 "$REPO/hongyan-config" || warn "hongyan-config exited with an error — run it later: $BIN/hongyan-config"
     else
         info "Run any time: $BIN/hongyan-config"

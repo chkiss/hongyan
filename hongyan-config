@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""hongyan-config — pick what the Hongyan bot may see and restart.
+"""hongyan-config — everything about the Hongyan bot's config in one place.
 
-Single-file, stdlib only. Run with no arguments for the interactive menu;
-subcommands for scripting.
+Single-file, stdlib only. No arguments starts the menu: services &
+permissions, Signal/API basics, auto-update. Subcommands for scripting.
 
 Two permissions per service, toggled separately:
   see     the bot reports the service's state (status, probes)
@@ -20,7 +20,12 @@ import subprocess
 import sys
 
 CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
+STATE_DIR = os.path.dirname(CONFIG_PATH)
 IS_WINDOWS = sys.platform.startswith("win")
+
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+E164_RE = re.compile(r"^\+[1-9][0-9]{7,14}$")
 
 _USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
 
@@ -39,8 +44,15 @@ def save(cfg):
     with open(tmp, "w") as fh:
         json.dump(cfg, fh, indent=2, ensure_ascii=False)
     os.replace(tmp, CONFIG_PATH)
+    print("Saved %s — restart the listener to apply." % CONFIG_PATH)
 
 
+def run(cmd, timeout=30):
+    return subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+# ── service detection ────────────────────────────────────────────────────────
 def detect():
     """Running services on this machine, noise-filtered."""
     out = []
@@ -48,9 +60,7 @@ def detect():
         cmd = ("powershell -NoProfile -Command \"Get-Service | Where-Object "
                "{$_.StartType -eq 'Automatic' -and $_.Status -eq 'Running'} | "
                "Select-Object -First 20 -ExpandProperty Name\"")
-        for line in subprocess.run(cmd, shell=True, capture_output=True,
-                                   text=True, timeout=30,
-                                   stdin=subprocess.DEVNULL).stdout.splitlines():
+        for line in run(cmd).stdout.splitlines():
             if line.strip():
                 out.append((line.strip(), "windows", line.strip()))
         return out
@@ -60,34 +70,27 @@ def detect():
         r"rsyslog|cron|anacron|logrotate|e2scrub|fstrim|man-db|fwupd|"
         r"packagekit|unattended|qemu|cloud-init|snapd|multipathd|lvm2|"
         r"open-iscsi|ssh|sshd)")
-    cmd = ("systemctl list-units --type=service --state=running --no-legend "
-           "--plain 2>/dev/null | awk '{print $1}'")
-    for line in subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=20).stdout.splitlines():
-        unit = line.strip()
-        if unit.endswith(".service"):
-            unit = unit[:-8]
-        if unit and not noise.match(unit):
-            out.append((unit, "system", unit))
-    cmd = ("systemctl --user list-units --type=service --state=running "
-           "--no-legend --plain 2>/dev/null | awk '{print $1}'")
-    for line in subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=20,
-                               stdin=subprocess.DEVNULL).stdout.splitlines():
-        unit = line.strip()
-        if unit.endswith(".service"):
-            unit = unit[:-8]
-        if unit:
-            out.append((unit, "user", unit))
+    for cmd, kind in (
+            ("systemctl list-units --type=service --state=running --no-legend "
+             "--plain 2>/dev/null | awk '{print $1}'", "system"),
+            ("systemctl --user list-units --type=service --state=running "
+             "--no-legend --plain 2>/dev/null | awk '{print $1}'", "user")):
+        for line in run(cmd).stdout.splitlines():
+            unit = line.strip()
+            if unit.endswith(".service"):
+                unit = unit[:-8]
+            if unit and (kind == "user" or not noise.match(unit)):
+                out.append((unit, kind, unit))
     return out[:20]
 
 
+# ── services model ───────────────────────────────────────────────────────────
 def known_map(cfg):
     """key -> [kind, target] for everything the bot has ever been shown.
 
     Configured services come first (they are the truth), then the _known
     catalog remembered from past scans — the listener ignores underscore
-    keys, so this is TUI memory, not bot behaviour.
+    keys, so this is config-tool memory, not bot behaviour.
     """
     known = {}
     for key, spec in (cfg.get("_known_services") or {}).items():
@@ -132,61 +135,8 @@ def sync_from_config(cfg, known):
             known[key] = [spec[0], spec[1]]
 
 
-# ── CLI ──────────────────────────────────────────────────────────────────────
-def cli(argv):
-    if argv[:1] == ["path"]:
-        print(CONFIG_PATH)
-        return 0
-    if argv[:1] == ["list"]:
-        cfg = load()
-        known = known_map(cfg)
-        see, restart = see_set(cfg), restart_set(cfg)
-        print("config: %s" % CONFIG_PATH)
-        for key in sorted(known):
-            kind, target = known[key]
-            print("  see [%s]  restart [%s]  %-22s %-8s %s"
-                  % ("x" if key in see else " ", "x" if key in restart else " ",
-                     key, kind, target))
-        return 0
-    if argv[:1] == ["detect"]:
-        for key, kind, target in detect():
-            print("  %-22s %-8s %s" % (key, kind, target))
-        return 0
-
-    cfg = load()
-    known = known_map(cfg)
-    see, restart = see_set(cfg), restart_set(cfg)
-
-    if argv[:1] in (["enable"], ["see"], ["restart"]):
-        mode = argv[0]
-        if len(argv) < 2:
-            print("usage: hongyan-config %s NAME [KIND] [TARGET]" % mode); return 2
-        key = argv[1]
-        known[key] = [argv[2] if len(argv) > 2 else known.get(key, ["system"])[0],
-                      argv[3] if len(argv) > 3 else known.get(key, ["", key])[1]]
-        see.add(key)
-        if mode in ("enable", "restart"):
-            restart.add(key)
-        apply_state(cfg, known, see, restart)
-        save(cfg)
-        return 0
-    if argv[:1] == ["disable"]:
-        if len(argv) < 2:
-            print("usage: hongyan-config disable NAME"); return 2
-        see.discard(argv[1])
-        restart.discard(argv[1])
-        apply_state(cfg, known, see, restart)
-        save(cfg)
-        return 0
-    print("usage: hongyan-config [list|detect|enable NAME [KIND] [TARGET]|"
-          "see NAME|restart NAME|disable NAME|path]\n"
-          "no subcommand starts the interactive menu")
-    return 2
-
-
-# ── TUI ──────────────────────────────────────────────────────────────────────
-def tui():
-    cfg = load()
+# ── services screen ──────────────────────────────────────────────────────────
+def services_screen(cfg):
     known = known_map(cfg)
     sync_from_config(cfg, known)
     see = see_set(cfg)
@@ -194,20 +144,17 @@ def tui():
     dirty = False
 
     def draw():
-        # clear must not inherit stdin: the ncurses clear child consumes a
-        # buffered line on piped input, silently eating menu keystrokes.
-        subprocess.run("cls" if IS_WINDOWS else "clear", shell=True,
-                       stdin=subprocess.DEVNULL)
+        run("cls" if IS_WINDOWS else "clear")
         star = _c("33", " *unsaved*") if dirty else ""
-        print(_c("1", "Hongyan — pick what it may see and restart") + star)
+        print(_c("1", "Hongyan services — pick what it may see and restart")
+              + star)
         print(_c("3", "config: %s" % CONFIG_PATH))
         print()
         print("   #  see  restart  service")
         for i, key in enumerate(sorted(known), 1):
             kind, target = known[key]
             s_mark = _c("32", "[x]") if key in see else _c("90", "[ ]")
-            r_mark = (_c("32", "[x]") if key in restart
-                      else _c("90", "[ ]"))
+            r_mark = _c("32", "[x]") if key in restart else _c("90", "[ ]")
             key_s = key if key in see else _c("90", key)
             print("  %2d  %s    %s       %-22s %-8s %s"
                   % (i, s_mark, r_mark, key_s, kind, target))
@@ -284,5 +231,263 @@ def _confirm_discard():
     return reply.startswith("y")
 
 
+# ── basics screen ────────────────────────────────────────────────────────────
+def _key_path(cfg):
+    return cfg.get("key_file") or os.path.join(STATE_DIR, "zen.key")
+
+
+def basics_fields(cfg):
+    return [
+        ("transport", "transport (bot_account | note_to_self)",
+         cfg.get("transport", "bot_account"),
+         lambda v: v in ("bot_account", "note_to_self"),
+         "bot_account or note_to_self"),
+        ("bot_number", "the BOT's own Signal number",
+         cfg.get("bot_number", ""), lambda v: bool(E164_RE.match(v)),
+         "+E.164, e.g. +15550000002 — must differ from owner_number"),
+        ("owner_number", "your phone number",
+         cfg.get("owner_number", ""), lambda v: bool(E164_RE.match(v)),
+         "+E.164, e.g. +15550000001"),
+        ("owner_aci", "your ACI (the only key that authorizes you)",
+         cfg.get("owner_aci", ""), lambda v: bool(UUID_RE.match(v)),
+         "UUID, e.g. 3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
+        ("api_base", "model API base URL",
+         cfg.get("api_base", ""), lambda v: v.startswith("http"),
+         "https://..."),
+        ("site_label", "label the bot uses for this machine",
+         (cfg.get("site") or {}).get("label", ""), lambda v: True, "free text"),
+    ]
+
+
+def basics_screen(cfg):
+    while True:
+        run("cls" if IS_WINDOWS else "clear")
+        print(_c("1", "Hongyan basics — Signal identity and model API"))
+        print(_c("3", "config: %s" % CONFIG_PATH))
+        print()
+        fields = basics_fields(cfg)
+        for i, (key, label, val, _ok, _hint) in enumerate(fields, 1):
+            shown = val if val else _c("90", "(not set)")
+            print("  %d %-46s %s" % (i, label + ":", shown))
+        key_p = _key_path(cfg)
+        have_key = os.path.exists(key_p)
+        print("  k  api key file                            %s (%s)"
+              % (key_p, _c("32", "present") if have_key
+                 else _c("33", "not set")))
+        print()
+        print("  <n> edit    k set api key    s save    q back")
+        print(_c("3", "  transport note_to_self links hongyan as a device on "
+                 "YOUR account — it sees every conversation. bot_account is a "
+                 "separate number."))
+        try:
+            choice = input("basics> ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if choice == "q":
+            return
+        if choice == "s":
+            save(cfg)
+            continue
+        if choice == "k":
+            key = input("  API key (Enter to cancel): ").strip()
+            if key:
+                with open(key_p, "w") as fh:
+                    fh.write(key)
+                os.chmod(key_p, 0o600)
+                cfg["key_file"] = key_p
+                print(_c("32", "  key written (%s, mode 600)" % key_p))
+            continue
+        if choice.isdigit() and 1 <= int(choice) <= len(fields):
+            key, label, _val, ok, hint = fields[int(choice) - 1]
+            val = input("  %s [%s]: " % (label, _val)).strip()
+            if not val:
+                continue
+            if not ok(val):
+                print(_c("33", "  %s" % hint))
+                input("  Enter to continue ")
+                continue
+            if key == "site_label":
+                cfg.setdefault("site", {})["label"] = val
+            else:
+                cfg[key] = val.lower() if key == "owner_aci" else val
+            print(_c("32", "  set (unsaved)"))
+
+
+# ── auto-update toggle ───────────────────────────────────────────────────────
+AUTO_CRON = "hongyan-autoupdate"
+
+
+def autoupdate_state():
+    if IS_WINDOWS:
+        return "unsupported"
+    cur = subprocess.run("crontab -l 2>/dev/null", shell=True,
+                         capture_output=True, text=True,
+                         stdin=subprocess.DEVNULL).stdout
+    return "on" if AUTO_CRON in cur else "off"
+
+
+def autoupdate_set(on, lines=None):
+    """Add/remove the autoupdate cron line. `lines` overrides the crontab
+    content (for testing). Returns the new crontab content."""
+    if lines is None:
+        lines = subprocess.run("crontab -l 2>/dev/null", shell=True,
+                               capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL).stdout
+    kept = []
+    for line in lines.splitlines():
+        if AUTO_CRON in line:
+            if kept and kept[-1].lstrip().startswith("#"):
+                kept.pop()           # its comment line goes too
+            continue
+        kept.append(line)
+    if on:
+        exe = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                           AUTO_CRON)
+        if not os.path.exists(exe):
+            exe = os.path.expanduser("~/.local/bin/" + AUTO_CRON)
+        kept += ["", "# Fast-forward to origin/main when tests pass",
+                 "*/15 * * * * %s" % exe]
+    new = "\n".join(kept).lstrip("\n")
+    if not new.endswith("\n"):
+        new += "\n"
+    if lines is None:
+        p = subprocess.run("crontab -", shell=True, input=new,
+                           capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL)
+        if p.returncode:
+            print(_c("31", "  crontab write failed: %s" % p.stderr.strip()))
+            return lines
+    return new
+
+
+def autoupdate_screen(cfg):
+    while True:
+        state = autoupdate_state()
+        print()
+        print("  auto-update: %s" % _c("32" if state == "on" else "33", state))
+        print(_c("3", "  on = cron every 15 min: git fast-forward to "
+                 "origin/main when the test suite passes. Silent on success,"))
+        print(_c("3", "  alerts over Signal on failure. Linux only — on "
+                 "Windows, pull manually."))
+        try:
+            choice = input("  t toggle   q back [autoupdate> ]: ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if choice in ("q", ""):
+            return
+        if choice == "t":
+            if IS_WINDOWS or state == "unsupported":
+                print(_c("33", "  Not supported on this platform."))
+                input("  Enter to continue ")
+                continue
+            autoupdate_set(state != "on")
+            print(_c("32", "  auto-update is now %s" % autoupdate_state()))
+
+
+# ── main menu ────────────────────────────────────────────────────────────────
+def main_menu():
+    while True:
+        run("cls" if IS_WINDOWS else "clear")
+        print(_c("1", "Hongyan config"))
+        print(_c("3", "config: %s" % CONFIG_PATH))
+        print()
+        print("  1  services & permissions   (what the bot may see/restart)")
+        print("  2  Signal & API basics      (numbers, ACI, transport, key)")
+        print("  3  auto-update              (cron fast-forward, Linux)")
+        print("  q  quit")
+        try:
+            choice = input("> ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if choice == "q":
+            print("Bye!")
+            return
+        if choice == "1":
+            services_screen(load())
+        elif choice == "2":
+            cfg = load()
+            basics_screen(cfg)
+            if _confirm_save_basics(cfg):
+                save(cfg)
+        elif choice == "3":
+            autoupdate_screen(load())
+
+
+def _confirm_save_basics(cfg):
+    try:
+        reply = input("  Save basics now? [Y/n] ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        reply = ""
+    if reply.startswith("n"):
+        print("  Discarded.")
+        return False
+    return True
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+def cli(argv):
+    if argv[:1] == ["path"]:
+        print(CONFIG_PATH)
+        return 0
+    if argv[:1] == ["list"]:
+        cfg = load()
+        known = known_map(cfg)
+        see, restart = see_set(cfg), restart_set(cfg)
+        print("config: %s" % CONFIG_PATH)
+        for key in sorted(known):
+            kind, target = known[key]
+            print("  see [%s]  restart [%s]  %-22s %-8s %s"
+                  % ("x" if key in see else " ", "x" if key in restart else " ",
+                     key, kind, target))
+        return 0
+    if argv[:1] == ["detect"]:
+        for key, kind, target in detect():
+            print("  %-22s %-8s %s" % (key, kind, target))
+        return 0
+    if argv[:1] == ["basics"]:
+        cfg = load()
+        for key, label, val, _ok, _hint in basics_fields(cfg):
+            print("%-14s %s" % (key + ":", val or "(not set)"))
+        print("key_file       %s" % _key_path(cfg))
+        return 0
+    if argv[:1] == ["autoupdate"]:
+        if argv[1:2] == ["on"] or argv[1:2] == ["off"]:
+            autoupdate_set(argv[1] == "on")
+            print("auto-update: %s" % autoupdate_state())
+        else:
+            print("auto-update: %s" % autoupdate_state())
+        return 0
+
+    cfg = load()
+    known = known_map(cfg)
+    see, restart = see_set(cfg), restart_set(cfg)
+
+    if argv[:1] in (["enable"], ["see"], ["restart"]):
+        mode = argv[0]
+        if len(argv) < 2:
+            print("usage: hongyan-config %s NAME [KIND] [TARGET]" % mode); return 2
+        key = argv[1]
+        known[key] = [argv[2] if len(argv) > 2 else known.get(key, ["system"])[0],
+                      argv[3] if len(argv) > 3 else known.get(key, ["", key])[1]]
+        see.add(key)
+        if mode in ("enable", "restart"):
+            restart.add(key)
+        apply_state(cfg, known, see, restart)
+        save(cfg)
+        return 0
+    if argv[:1] == ["disable"]:
+        if len(argv) < 2:
+            print("usage: hongyan-config disable NAME"); return 2
+        see.discard(argv[1])
+        restart.discard(argv[1])
+        apply_state(cfg, known, see, restart)
+        save(cfg)
+        return 0
+    print("usage: hongyan-config [list|detect|basics|autoupdate on|off|"
+          "enable NAME [KIND] [TARGET]|see NAME|restart NAME|disable NAME|path]\n"
+          "no subcommand starts the interactive menu")
+    return 2
+
+
 if __name__ == "__main__":
-    sys.exit(tui() if len(sys.argv) <= 1 else cli(sys.argv[1:]))
+    sys.exit(main_menu() if len(sys.argv) <= 1 else cli(sys.argv[1:]))
