@@ -604,9 +604,9 @@ def main_menu():
         print(_c("1", "Hongyan config"))
         print(_c("3", "config: %s" % CONFIG_PATH))
         print()
-        print("  3  services & permissions   (what the bot may see/restart)")
-        print("  2  Signal & API basics      (numbers, ACI, transport, key)")
         print("  1  auto-update              (cron fast-forward, Linux)")
+        print("  2  Signal & API basics      (numbers, ACI, transport, key)")
+        print("  3  services & permissions   (what the bot may see/restart)")
         print("  q  quit")
         try:
             choice = input("> ").strip().lower()
