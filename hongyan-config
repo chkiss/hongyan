@@ -212,7 +212,7 @@ def tui():
             print("  %2d  %s    %s       %-22s %-8s %s"
                   % (i, s_mark, r_mark, key_s, kind, target))
         print()
-        print("  <n> toggle see    <n>r toggle restart    r refresh    "
+        print("  <n> cycle: off → see → see + restart    r refresh    "
               "n add by hand")
         print("  s save   q quit without saving")
         print(_c("3", "  see = the bot reports this service's state (status, "
@@ -259,21 +259,20 @@ def tui():
                 restart.add(parts[0])
                 dirty = True
             continue
-        m = re.fullmatch(r"(\d+)(r?)", choice)
-        if m:
-            idx, want_restart = int(m.group(1)), bool(m.group(2))
+        if choice.isdigit():
             keys = sorted(known)
+            idx = int(choice)
             if not 1 <= idx <= len(keys):
                 continue
             key = keys[idx - 1]
-            if want_restart:
-                restart ^= {key}
-                if key in restart:
-                    see.add(key)          # restart implies see
+            # cycle: off -> see -> see + restart -> off
+            if key not in see:
+                see.add(key)
+            elif key not in restart:
+                restart.add(key)
             else:
-                see ^= {key}
-                if key not in see:
-                    restart.discard(key)  # unseeing revokes restart
+                see.discard(key)
+                restart.discard(key)
             dirty = True
 
 
