@@ -26,9 +26,8 @@ fi
 
 if ! hongyan_alive "$DAEMON_PID" "daemon"; then
     rm -f "$SOCK"
-    nohup "$HOME/.local/bin/signal-cli" daemon \
+    nohup "$HOME/.local/bin/signal-cli" --log-file "$DIR/cli.log" daemon \
         --socket "$SOCK" --receive-mode on-connection --no-receive-stdout \
-        --log-file "$DIR/cli.log" \
         >> "$LOG" 2>&1 &
     echo $! > "$DAEMON_PID"
     for _ in $(seq 1 30); do
