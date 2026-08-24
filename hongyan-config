@@ -99,7 +99,22 @@ def known_map(cfg):
     """
     known = {}
     for key, spec in (cfg.get("_known_services") or {}).items():
-        known[key] = [spec.get("type", "system"), spec.get("unit") or key]
+        kind = spec.get("type", "system")
+        if kind in ("media", "probe"):
+            raw = spec.get("unit") or "{}"
+            try:
+                known[key] = [kind, json.loads(raw)]
+            except ValueError:
+                known[key] = [kind, {}]
+        else:
+            known[key] = [kind, spec.get("unit") or key]
+    # Live integrations are namespaced ("media:sonarr", "probe:arr_health")
+    # because the same name can also be a Windows service — watching the
+    # Sonarr service and querying the Sonarr API are separate permissions.
+    for key, spec in (cfg.get("media_apps") or {}).items():
+        known["media:" + key] = ["media", spec]
+    for key, spec in (cfg.get("http_probes") or {}).items():
+        known["probe:" + key] = ["probe", spec]
     for key, spec in (cfg.get("services") or {}).items():
         if isinstance(spec, dict):
             kind = spec.get("type", "system")
@@ -111,7 +126,11 @@ def known_map(cfg):
 
 
 def see_set(cfg):
-    return set(cfg.get("services") or [])
+    """Enabled keys, namespaced to match known_map: services keep their bare
+    name; integrations are 'media:<app>' and 'probe:<name>'."""
+    return (set(cfg.get("services") or {})
+            | {"media:" + k for k in (cfg.get("media_apps") or {})}
+            | {"probe:" + k for k in (cfg.get("http_probes") or {})})
 
 
 def restart_set(cfg):
@@ -119,13 +138,27 @@ def restart_set(cfg):
 
 
 def apply_state(cfg, known, see, restart):
-    """Write services + allowed_units from the permission state, keep _known."""
+    """Write the permission state back: service kinds into services +
+    allowed_units (restart implies see), media/probe kinds into media_apps +
+    http_probes (see = enabled, there is no restart). _known remembers all."""
     restart = restart & see   # cannot restart what the bot cannot see
-    cfg["services"] = {k: {"type": known[k][0], "unit": known[k][1]}
-                       for k in sorted(see) if k in known}
-    cfg["allowed_units"] = sorted(restart)
-    cfg["_known_services"] = {k: {"type": v[0], "unit": v[1]}
-                              for k, v in sorted(known.items())}
+    cfg["services"] = {}
+    cfg["media_apps"] = {}
+    cfg["http_probes"] = {}
+    for k in sorted(see):
+        if k not in known:
+            continue
+        kind, target = known[k]
+        if kind in ("media", "probe"):
+            section = "media_apps" if kind == "media" else "http_probes"
+            cfg[section][k.split(":", 1)[1]] = target
+        else:
+            cfg["services"][k] = {"type": kind, "unit": target}
+    cfg["allowed_units"] = sorted(k for k in restart if k in cfg["services"])
+    cfg["_known_services"] = {
+        k: ({"type": v[0], "unit": json.dumps(v[1])}
+            if isinstance(v[1], dict) else {"type": v[0], "unit": v[1]})
+        for k, v in sorted(known.items())}
     cfg["onboarding_done"] = True
 
 
@@ -158,9 +191,12 @@ def services_screen(cfg):
         print("   #  see  restart  service")
         for i, key in enumerate(sorted(known), 1):
             kind, target = known[key]
+            integration = kind in ("media", "probe")
+            shown = key.split(":", 1)[1] if ":" in key else key
             s_mark = _c("32", "[x]") if key in see else _c("90", "[ ]")
-            r_mark = _c("32", "[x]") if key in restart else _c("90", "[ ]")
-            key_s = key if key in see else _c("90", key)
+            r_mark = ((_c("90", " — ") if integration else
+                       (_c("32", "[x]") if key in restart else _c("90", "[ ]"))))
+            key_s = shown if key in see else _c("90", shown)
             print("  %2d  %s    %s       %-22s %-8s %s"
                   % (i, s_mark, r_mark, key_s, kind, target))
         print()
@@ -217,8 +253,12 @@ def services_screen(cfg):
             if not 1 <= idx <= len(keys):
                 continue
             key = keys[idx - 1]
-            # cycle: off -> see -> see + restart -> off
-            if key not in see:
+            kind = known[key][0]
+            if kind in ("media", "probe"):
+                # integrations have no restart permission: on/off is the cycle
+                see ^= {key}
+            # cycle for services: off -> see -> see + restart -> off
+            elif key not in see:
                 see.add(key)
             elif key not in restart:
                 restart.add(key)
