@@ -108,6 +108,12 @@ def known_map(cfg):
                 known[key] = [kind, {}]
         else:
             known[key] = [kind, spec.get("unit") or key]
+    for key, spec in (cfg.get("allowed_jobs") or {}).items():
+        known["job:" + key] = ["job", spec]
+    for key, spec in (cfg.get("custom_commands") or {}).items():
+        known["command:" + key] = ["command", spec]
+    if cfg.get("webhook_port"):
+        known["webhook:receiver"] = ["webhook", {"port": cfg["webhook_port"]}]
     # Live integrations are namespaced ("media:sonarr", "probe:arr_health")
     # because the same name can also be a Windows service — watching the
     # Sonarr service and querying the Sonarr API are separate permissions.
@@ -130,7 +136,9 @@ def see_set(cfg):
     name; integrations are 'media:<app>' and 'probe:<name>'."""
     return (set(cfg.get("services") or {})
             | {"media:" + k for k in (cfg.get("media_apps") or {})}
-            | {"probe:" + k for k in (cfg.get("http_probes") or {})})
+            | {"probe:" + k for k in (cfg.get("http_probes") or {})}
+            | {"command:" + k for k in (cfg.get("custom_commands") or {})}
+            | ({"webhook:receiver"} if cfg.get("webhook_port") else set()))
 
 
 def restart_set(cfg):
@@ -141,20 +149,30 @@ def apply_state(cfg, known, see, restart):
     """Write the permission state back: service kinds into services +
     allowed_units (restart implies see), media/probe kinds into media_apps +
     http_probes (see = enabled, there is no restart). _known remembers all."""
-    restart = restart & see   # cannot restart what the bot cannot see
     cfg["services"] = {}
     cfg["media_apps"] = {}
     cfg["http_probes"] = {}
+    cfg["allowed_jobs"] = {}
+    cfg["custom_commands"] = {}
+    cfg.pop("webhook_port", None)
     for k in sorted(see):
         if k not in known:
             continue
         kind, target = known[k]
-        if kind in ("media", "probe"):
-            section = "media_apps" if kind == "media" else "http_probes"
-            cfg[section][k.split(":", 1)[1]] = target
+        if kind == "media":
+            cfg["media_apps"][k.split(":", 1)[1]] = target
+        elif kind == "probe":
+            cfg["http_probes"][k.split(":", 1)[1]] = target
+        elif kind == "command":
+            cfg["custom_commands"][k.split(":", 1)[1]] = target
+        elif kind == "webhook":
+            cfg["webhook_port"] = (target or {}).get("port")
         else:
             cfg["services"][k] = {"type": kind, "unit": target}
     cfg["allowed_units"] = sorted(k for k in restart if k in cfg["services"])
+    cfg["allowed_jobs"] = {k.split(":", 1)[1]: v[1]
+                           for k, v in known.items()
+                           if v[0] == "job" and k in restart}
     cfg["_known_services"] = {
         k: ({"type": v[0], "unit": json.dumps(v[1])}
             if isinstance(v[1], dict) else {"type": v[0], "unit": v[1]})
@@ -181,34 +199,81 @@ def services_screen(cfg):
     restart = restart_set(cfg)
     dirty = False
 
-    def draw():
-        run("cls" if IS_WINDOWS else "clear")
-        star = _c("33", " *unsaved*") if dirty else ""
-        print(_c("1", "Hongyan services — pick what it may see and restart")
-              + star)
-        print(_c("3", "config: %s" % CONFIG_PATH))
-        print()
-        print("   #  see  restart  service")
-        for i, key in enumerate(sorted(known), 1):
-            kind, target = known[key]
-            integration = kind in ("media", "probe")
-            shown = key.split(":", 1)[1] if ":" in key else key
-            s_mark = _c("32", "[x]") if key in see else _c("90", "[ ]")
-            r_mark = ((_c("90", " — ") if integration else
-                       (_c("32", "[x]") if key in restart else _c("90", "[ ]"))))
-            key_s = shown if key in see else _c("90", shown)
-            print("  %2d  %s    %s       %-22s %-8s %s"
-                  % (i, s_mark, r_mark, key_s, kind, target))
-        print()
-        print("  <n> cycle: off → see → see + restart    r refresh    "
-              "n add by hand")
-        print("  s save   q quit without saving")
-        print(_c("3", "  See = the bot reports this service's state (status, "
-                 "probes)"))
-        print(_c("3", "  Restart = the bot restarts it when you ask "
-                 "(includes see)"))
+    def classify():
+        """Parents (real services), their integrations, and the general
+        group (jobs, commands, webhook, unparented probes)."""
+        parents, children, general = [], {}, []
+        for key in sorted(known):
+            kind = known[key][0]
+            suffix = key.split(":", 1)[1] if ":" in key else None
+            if kind in ("media", "probe") and suffix and suffix in known \
+                    and known[suffix][0] not in ("media", "probe", "job",
+                                                 "command", "webhook"):
+                children.setdefault(suffix, []).append(key)
+            elif kind in ("media", "probe", "job", "command", "webhook"):
+                general.append(key)
+            else:
+                parents.append(key)
+        return parents, children, general
+
+    def target_label(key):
+        kind, target = known[key]
+        if isinstance(target, dict):
+            return (target.get("desc") or target.get("url") or
+                    key.split(":", 1)[1])
+        return str(target)[:40]
 
     while True:
+        parents, children, general = classify()
+        rows = []
+
+        def draw():
+            run("cls" if IS_WINDOWS else "clear")
+            star = _c("33", " *unsaved*") if dirty else ""
+            print(_c("1", "Hongyan services — pick what it may see and restart")
+                  + star)
+            print(_c("3", "config: %s" % CONFIG_PATH))
+            print()
+            print("   #  see  restart  service")
+            for parent in parents:
+                kind, target = known[parent]
+                s_mark = _c("32", "[x]") if parent in see else _c("90", "[ ]")
+                r_mark = _c("32", "[x]") if parent in restart else _c("90", "[ ]")
+                t_label = target if isinstance(target, str) else ""
+                rows.append(parent)
+                print("  %2d  %s    %s       %-22s %-8s %s"
+                      % (len(rows), s_mark, r_mark, parent, kind, t_label))
+                for child in children.get(parent, []):
+                    ckind, ctarget = known[child]
+                    c_s = _c("32", "[x]") if child in see else _c("90", "[ ]")
+                    rows.append(child)
+                    print("  %2d   %s    %s       %-22s %-8s %s"
+                          % (len(rows), c_s, "—", child.split(":", 1)[1],
+                             ckind, target_label(child)[:44]))
+            if general:
+                print(_c("3", "  ── general ──"))
+                for key in general:
+                    kind, target = known[key]
+                    if kind == "job":
+                        s_mark = _c("90", " — ")
+                        r_mark = (_c("32", "[x]") if key in restart
+                                  else _c("90", "[ ]"))
+                    else:
+                        s_mark = (_c("32", "[x]") if key in see
+                                  else _c("90", "[ ]"))
+                        r_mark = _c("90", " — ")
+                    rows.append(key)
+                    print("  %2d  %s    %s       %-22s %-8s %s"
+                          % (len(rows), s_mark, r_mark, key.split(":", 1)[1],
+                             kind, target_label(key)[:44]))
+            print()
+            print("  <n> cycle: off → see → see + restart (cascades to the "
+                  "sub-items below a service)")
+            print("  jobs: <n> toggles run-now.   r refresh    n add by hand")
+            print("  s save    q quit without saving")
+            print(_c("3", "  See = the bot reports it. Restart = the bot "
+                     "restarts it when you ask."))
+
         draw()
         try:
             choice = input("> ").strip().lower()
@@ -247,24 +312,39 @@ def services_screen(cfg):
                 restart.add(parts[0])
                 dirty = True
             continue
-        if choice.isdigit():
-            keys = sorted(known)
-            idx = int(choice)
-            if not 1 <= idx <= len(keys):
-                continue
-            key = keys[idx - 1]
+        if choice.isdigit() and 1 <= int(choice) <= len(rows):
+            key = rows[int(choice) - 1]
             kind = known[key][0]
-            if kind in ("media", "probe"):
-                # integrations have no restart permission: on/off is the cycle
-                see ^= {key}
-            # cycle for services: off -> see -> see + restart -> off
-            elif key not in see:
+            if kind == "job":
+                # run-now permission: lives in the restart set
+                if key in restart:
+                    restart.discard(key)
+                else:
+                    restart.add(key)
+                dirty = True
+                continue
+            if kind in ("media", "probe", "command", "webhook"):
+                # see-only: on/off, no restart
+                if key in see:
+                    see.discard(key)
+                else:
+                    see.add(key)
+                dirty = True
+                continue
+            # services: cycle off -> see -> see + restart -> off
+            if key not in see:
                 see.add(key)
             elif key not in restart:
                 restart.add(key)
             else:
                 see.discard(key)
                 restart.discard(key)
+            # integrations follow their service unless toggled individually
+            for child in children.get(key, []):
+                if key in see:
+                    see.add(child)
+                else:
+                    see.discard(child)
             dirty = True
 
 
@@ -632,6 +712,27 @@ NOTE_TO_SELF_WARNING = """
 
 def install_flow():
     repo = repo_dir()
+
+    # a fresh install should never run stale code: fetch and fast-forward
+    if os.path.isdir(os.path.join(repo, ".git")):
+        print("  Checking for a newer version")
+        subprocess.run(["git", "-C", repo, "fetch", "origin", "main"],
+                       capture_output=True, stdin=subprocess.DEVNULL, timeout=60)
+        local = subprocess.run(["git", "-C", repo, "rev-parse", "HEAD"],
+                               capture_output=True, text=True,
+                               stdin=subprocess.DEVNULL).stdout.strip()
+        remote = subprocess.run(["git", "-C", repo, "rev-parse", "origin/main"],
+                                capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL).stdout.strip()
+        if local and remote and local != remote:
+            upd = subprocess.run(["git", "-C", repo, "merge", "--ff-only",
+                                  "origin/main"], capture_output=True,
+                                 text=True, stdin=subprocess.DEVNULL)
+            if upd.returncode == 0:
+                print(_c("32", "  updated to %s" % remote[:8]))
+            else:
+                print(_c("33", "  could not fast-forward — continuing on %s"
+                         % local[:8]))
     print(_c("1", "Hongyan installer"))
     if IS_WINDOWS:
         print(_c("33", "  Windows: signal-cli and Java setup is manual — see "
