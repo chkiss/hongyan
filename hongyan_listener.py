@@ -1278,10 +1278,8 @@ def cmd_assistant_state():
         parts.append("monthly review: offered this month, waiting for your yes/no")
     else:
         parts.append("monthly review: due — will be offered after your next message")
-    benched = [(m, r.get("why", "")) for m, r in _load_model_state().items()
-               if not _usable(m)]
-    parts.append("model channels benched: %s" %
-                 ("; ".join("%s (%s)" % (m, clip(w, 50)) for m, w in benched) or "none"))
+    bench = bench_report()
+    parts.append("model channels benched: %s" % ("; ".join(bench) or "none"))
     pending = pending_items()
     parts.append("queue: %d open, %d waiting to be raised"
                  % (len(pending), stale_pending_count()))
@@ -1819,10 +1817,14 @@ def describe_image(text, attachments):
         desc = model_call("vision", messages)  # no cap — lets the model reason fully
         if desc is None:
             describe_image.last_was_exhausted = True
-            return "", ("the vision chain could not describe that image (%s) — "
-                        "I can still answer from your message alone. I'll describe "
-                        "it with my next reply once the image models recover."
-                        % " -> ".join(vision))
+            msg = ("the vision chain could not describe that image (%s) — "
+                   "I can still answer from your message alone. I'll describe "
+                   "it with my next reply once the image models recover."
+                   % " -> ".join(vision))
+            bench = bench_report()
+            if bench:
+                msg += "\n" + "\n".join("  " + b for b in bench)
+            return "", msg
         describe_image.last_was_exhausted = False
         descriptions.append(desc.strip())
     if not descriptions:
@@ -2027,6 +2029,39 @@ def _load_model_state():
             return json.load(fh)
     except (OSError, ValueError):
         return {}
+
+
+def _bench_reason(why):
+    """The raw why is often a JSON error dump; reduce it to the essence."""
+    w = why or ""
+    if "503" in w:
+        return "provider outage (503)"
+    if "429" in w or "FreeUsageLimit" in w or "Rate limit" in w:
+        return "free-tier rate limit (429)"
+    if "empty content" in w:
+        return "returned empty content"
+    if "404" in w or "not supported" in w:
+        return "model withdrawn (404)"
+    return clip(w, 50)
+
+
+def bench_report():
+    """One line per benched model: name — reason — when it comes back."""
+    now = time.time()
+    lines = []
+    for m, r in sorted(_load_model_state().items()):
+        if _usable(m):
+            continue
+        until = r.get("until")
+        if until is None:
+            when = "until a human clears it"
+        else:
+            mins = int((until - now) / 60)
+            when = ("retry in ~%dm" % mins if 0 <= mins < 120 else
+                    "retry after " + time.strftime("%b %d %H:%M",
+                                                   time.localtime(until)))
+        lines.append("%s — %s (%s)" % (m, _bench_reason(r.get("why")), when))
+    return lines
 
 
 def bench_model(model, why, seconds=BENCH_SECONDS):

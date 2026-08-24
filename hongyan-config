@@ -399,6 +399,8 @@ def basics_screen(cfg):
         print("  k  api key file                            %s (%s)"
               % (key_p, _c("32", "present") if have_key
                  else _c("33", "not set")))
+        print("  r  model roster check                      %s"
+              % (_c("32", "on") if cfg.get("roster_check") else _c("33", "off")))
         print()
         print("  <n> edit    k set api key    s save    q back")
         print(_c("3", "  Transport note_to_self links Hongyan as a device on "
@@ -412,6 +414,11 @@ def basics_screen(cfg):
             return
         if choice == "s":
             save(cfg)
+            continue
+        if choice == "r":
+            cfg["roster_check"] = not cfg.get("roster_check")
+            print(_c("32", "  roster check: %s (unsaved)"
+                     % ("on" if cfg.get("roster_check") else "off")))
             continue
         if choice == "k":
             key = input("  API key (Enter to cancel): ").strip()
@@ -839,6 +846,12 @@ def install_flow():
             print("  Silent on success; alerts over Signal if an update fails.")
         else:
             print("  Update by hand with: git -C %s pull" % repo)
+        if _confirm("Enable the model roster check? The monthly review would "
+                    "fetch the provider's model catalog once a month to spot "
+                    "renamed or vanished models.", True):
+            cfg["roster_check"] = True
+        else:
+            cfg["roster_check"] = False
 
     print("  Running the test suite")
     tests = os.path.join(repo, "tests", "test_listener.py")

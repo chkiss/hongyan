@@ -132,10 +132,24 @@ print(os.path.expanduser(cfg.get("attachment_dir")
     ATT_DIR="${ATT_DIR:-$HOME/.local/share/signal-cli/attachments}"
     find "$ATT_DIR" -type f -mtime +14 -delete 2>/dev/null
 
-    # No provider poll here, deliberately. A model that has gone reports itself
-    # the next time a real message needs it — see note_model_gone — so nothing
-    # contacts the inference API on a timer. The queue digest is likewise not
-    # sent here: it is offered in conversation, after a message the owner sent.
+    # Model-dependency check, gated by roster_check in the config (off =
+    # zero scheduled provider contact, the original default). When on: one
+    # lightweight catalog request a day, so a model that left the free tier
+    # is reported before answers start failing — not discovered mid-chat.
+    # The queue digest is still not sent here: it is offered in conversation,
+    # after a message the owner sent.
+    if /usr/bin/python3 -c '
+import json, os, sys
+cfg = json.load(open(os.path.expanduser("~/.config/hongyan/config.json")))
+sys.exit(0 if cfg.get("roster_check") else 1)' 2>/dev/null; then
+        report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
+        if [ -n "$report" ]; then
+            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
+            log "daily model check: DEPENDENCY MISSING, alerted"
+        else
+            log "daily model check: ok"
+        fi
+    fi
 
     if [ "${#problems[@]}" -eq 0 ]; then
         log "daily ok"
