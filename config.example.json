@@ -92,5 +92,12 @@
       "desc": "last backup result",
       "command": "tail -n 3 ~/backup.log"
     }
-  }
+  },
+  "http_probes": {},
+  "media_apps": {},
+  "webhook_port": 8686,
+  "webhook_token": "",
+  "_http_probes_note": "Any JSON API becomes a probe: name -> {url, key or key_file, key_header, path (dot path, [*] collects), desc}. The model picks the NAME; the URL and key stay in config.",
+  "_media_apps_note": "qbittorrent: {url, user, pass or pass_file} -> downloads command. overseerr: {url, key or key_file} -> requests command. sonarr/radarr: {url, key or key_file} -> releases command.",
+  "_webhook_note": "If webhook_port is set, the listener listens on 127.0.0.1:<port> for POST /sonarr|/radarr|/plex — point the apps webhooks at it and events arrive as Signal messages. webhook_token (optional) is checked as ?token= or X-Hongyan-Token."
 }

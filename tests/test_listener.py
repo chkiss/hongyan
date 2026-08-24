@@ -1381,6 +1381,93 @@ if os.path.exists(os.path.join(_tmp_home, "config.json")):
 shutil.rmtree(_tmp_home, ignore_errors=True)
 
 
+section("json path extractor")
+
+data = {"a": {"b": [1, 2, {"c": "deep"}]}, "top": "level"}
+check("dot path", m.json_path(data, "a.b.[0]"), ["1"])
+check("star collect", m.json_path(data, "a.b.[*].c"), ["deep"])
+check("scalar top", m.json_path(data, "top"), ["level"])
+check("missing path is empty", m.json_path(data, "a.x.y"), [])
+check("dict serialises as json", m.json_path(data, "a.b.[2]"),
+      ['{"c": "deep"}'])
+
+
+section("http probe kind")
+
+_saved_cp = m.CONFIG_PATH
+_saved_cfg = dict(m.CFG)
+_saved_sh = m.sh
+m.CFG = {"http_probes": {
+    "arr_health": {"desc": "arr health warnings",
+                   "url": "http://127.0.0.1:8989/api/v3/health",
+                   "key": "sekrit", "path": "[*].message",
+                   "empty": "all clear"}}}
+m.register_http_probes(m.CFG)
+check("http probe registered", "arr_health" in m.PROBE_REGISTRY, True)
+check("registry marker", m.PROBE_REGISTRY["arr_health"][1],
+      "__http__:arr_health")
+
+_real_get = m.http_get_json
+m.http_get_json = lambda *a, **k: [{"message": "all clear"}]
+check("empty health list says so", m.http_probe_fetch("arr_health"),
+      "all clear")
+m.http_get_json = lambda *a, **k: [{"message": "proxy down"},
+                                   {"message": "root folder missing"}]
+check("warnings joined", "proxy down" in m.http_probe_fetch("arr_health")
+      and "root folder missing" in m.http_probe_fetch("arr_health"), True)
+m.http_get_json = lambda *a, **k: (_ for _ in ()).throw(IOError("refused"))
+check("failure reports, never crashes",
+      m.http_probe_fetch("arr_health").startswith("(probe failed"), True)
+m.http_get_json = _real_get
+m.PROBE_REGISTRY.pop("arr_health", None)
+m.CFG = _saved_cfg
+m.CONFIG_PATH = _saved_cp
+m.sh = _saved_sh
+
+
+section("media formatters")
+
+torrents = [
+    {"name": "Holy Matrimony 1994", "progress": 0.816, "state": "downloading",
+     "eta": 600, "remaining": 728e6, "category": "radarr"},
+    {"name": "Fargo S01", "progress": 1.0, "state": "uploading",
+     "ratio": 2.5, "uploaded": 5e9},
+]
+out = m.fmt_downloads(torrents)
+check("downloads shows progress", "81.6%" in out, True)
+check("downloads shows eta", "ETA" in out, True)
+check("downloads shows seeding ratio", "ratio 2.50" in out, True)
+check("empty queue is a sentence",
+      m.fmt_downloads([]), "Download queue is empty. Nothing downloading, nothing seeding.")
+
+requests = [
+    {"status": 2, "media": {"title": "Holy Matrimony", "mediaType": "movie"},
+     "requestedBy": {"displayName": "abood"}},
+    {"status": 3, "media": {"title": "Arrived", "mediaType": "movie"},
+     "requestedBy": {"displayName": "x"}},
+]
+out = m.fmt_requests(requests)
+check("requests lists open ones", "Holy Matrimony" in out and "approved — waiting" in out, True)
+check("requests skips available", "Arrived" not in out, True)
+check("no open requests reads clean",
+      m.fmt_requests([]), "No open requests — everything requested has arrived.")
+
+sonarr = [{"airDateUtc": "2026-08-24T00:00:00Z", "series": {"title": "Fargo"},
+           "seasonNumber": 5, "episodeNumber": 3, "title": "The Paradox"}]
+radarr = [{"title": "Some Movie", "digitalRelease": "2026-08-26T00:00:00Z"}]
+out = m.fmt_calendar(sonarr, radarr)
+check("calendar lists today's episode", "Fargo S05E03" in out, True)
+check("calendar lists movie release", "Some Movie" in out, True)
+
+web = {"event": "Grab", "series": {"title": "Fargo"},
+       "episodes": [{"seasonNumber": 5, "episodeNumber": 3}]}
+check("webhook grab formats", "grabbed" in m.fmt_webhook("sonarr", web)
+      and "Fargo" in m.fmt_webhook("sonarr", web), True)
+plex = {"event": "media.play", "Metadata": {"title": "The Bear"}}
+check("webhook plex play formats", "playback started" in m.fmt_webhook("plex", plex), True)
+check("webhook quiet on unknown", m.fmt_webhook("plex", {"event": "media.stop"}), None)
+
+
 section("unknown cli flag dies")
 
 listener_py = os.path.join(ROOT, "hongyan_listener.py")

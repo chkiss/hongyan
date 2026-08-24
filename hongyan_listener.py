@@ -1314,6 +1314,25 @@ for _name, _fn in CUSTOM_COMMANDS.items():
         continue
     T1[_name] = _fn
 
+def register_media_commands():
+    # Media commands appear only when their app is configured, and can never
+    # shadow a built-in or a custom command — the same rule as above. Runs
+    # late: the command functions live further down the file.
+    for app, cmd_name, syn in (
+            ("qbittorrent", "downloads",
+             ["downloads", "download queue", "torrents", "seeding"]),
+            ("overseerr", "requests", ["requests", "pending requests"]),
+            ("sonarr", "releases", ["releases", "calendar", "airing", "upcoming"]),
+            ("radarr", "releases", None)):
+        if not _media_cfg(app):
+            continue
+        if cmd_name in T1:
+            continue
+        T1[cmd_name] = {"downloads": cmd_downloads, "requests": cmd_requests,
+                        "releases": cmd_releases}[cmd_name]
+        if syn:
+            SYNONYMS[cmd_name] = syn
+
 
 # --------------------------------------------------------------------------
 # T2 reversible actions
@@ -2668,11 +2687,471 @@ if IS_WINDOWS:
 MAX_PROBES = 4
 
 
+# --------------------------------------------------------------------------
+# HTTP API probes: any JSON API becomes a probe via config alone. The model
+# picks the NAME from the registry; the URL, the key and the extraction live
+# in config — a prompt can never aim a probe at a different host.
+# --------------------------------------------------------------------------
+
+def http_get_json(url, key=None, key_header="X-Api-Key",
+                  data=None, headers=None, timeout=15):
+    req = urllib.request.Request(url)
+    if key:
+        req.add_header(key_header, key)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    body = None
+    if data is not None:
+        body = json.dumps(data).encode()
+        req.add_header("Content-Type", "application/json")
+    with urllib.request.urlopen(req, timeout=timeout, data=body) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+        return json.loads(raw) if raw.strip() else {}
+
+
+def json_path(data, path):
+    """Tiny dot-path extractor: 'a.b.[*].c' — [*] collects across arrays,
+    [n] indexes. Returns a flat list of scalar strings."""
+    cur = [data]
+    for part in path.split("."):
+        part = part.strip()
+        if not part:
+            continue
+        nxt = []
+        for item in cur:
+            if part == "[*]":
+                if isinstance(item, list):
+                    nxt.extend(item)
+            elif part.startswith("[") and part.endswith("]"):
+                try:
+                    idx = int(part[1:-1])
+                except ValueError:
+                    continue
+                if isinstance(item, list) and -len(item) <= idx < len(item):
+                    nxt.append(item[idx])
+            elif isinstance(item, dict) and part in item:
+                nxt.append(item[part])
+        cur = nxt
+    out = []
+    for item in cur:
+        if isinstance(item, (dict, list)):
+            out.append(json.dumps(item, ensure_ascii=False))
+        else:
+            out.append(str(item))
+    return out
+
+
+def http_probe_fetch(name):
+    spec = (CFG.get("http_probes") or {}).get(name)
+    if not spec:
+        return "(probe %s is not configured)" % name
+    key = spec.get("key")
+    if not key and spec.get("key_file"):
+        try:
+            with open(os.path.expanduser(spec["key_file"])) as fh:
+                key = fh.read().strip()
+        except OSError:
+            key = None
+    try:
+        data = http_get_json(spec["url"], key=key,
+                             key_header=spec.get("key_header", "X-Api-Key"))
+        path = spec.get("path") or ""
+        vals = json_path(data, path) if path else [
+            json.dumps(data, ensure_ascii=False)]
+        if not vals:
+            return spec.get("empty") or "(no data)"
+        return "; ".join(vals)[:2000]
+    except Exception as exc:  # noqa: BLE001 - probes report, never crash
+        return "(probe failed: %s)" % exc
+
+
+def register_http_probes(cfg):
+    for name, spec in (cfg.get("http_probes") or {}).items():
+        if name in PROBE_REGISTRY:
+            continue
+        PROBE_REGISTRY[name] = (spec.get("desc") or "HTTP API probe",
+                                "__http__:" + name)
+
+
+# ── media apps: qBittorrent / Sonarr / Radarr / Overseerr ───────────────────
+def _media_cfg(app):
+    return (CFG.get("media_apps") or {}).get(app)
+
+
+def _media_key(app):
+    spec = _media_cfg(app) or {}
+    if spec.get("key"):
+        return spec["key"]
+    if spec.get("key_file"):
+        try:
+            with open(os.path.expanduser(spec["key_file"])) as fh:
+                return fh.read().strip()
+        except OSError:
+            return None
+    return None
+
+
+def _media_pass(app):
+    spec = _media_cfg(app) or {}
+    if spec.get("pass"):
+        return spec["pass"]
+    if spec.get("pass_file"):
+        try:
+            with open(os.path.expanduser(spec["pass_file"])) as fh:
+                return fh.read().strip()
+        except OSError:
+            return ""
+    return ""
+
+
+def _fmt_eta(seconds):
+    try:
+        s = int(float(seconds))
+    except (TypeError, ValueError):
+        return ""
+    if s <= 0 or s > 86400 * 7:
+        return ""
+    return " ETA %02d:%02d:%02d" % (s // 3600, (s % 3600) // 60, s % 60)
+
+
+def fmt_downloads(torrents):
+    """torrents = qBittorrent /torrents/info list -> compact Signal text."""
+    if not torrents:
+        return "Download queue is empty. Nothing downloading, nothing seeding."
+    active, seeding = [], []
+    for t in torrents:
+        name = (t.get("name") or "?")[:70]
+        prog = (t.get("progress") or 0) * 100
+        state = t.get("state") or ""
+        eta = _fmt_eta(t.get("eta"))
+        cat = (" [%s]" % t["category"]) if t.get("category") else ""
+        if state in ("downloading", "stalledDL", "metaDL", "forcedDL"):
+            eta_txt = ""
+            if t.get("remaining"):
+                eta_txt = " %.1f MB left" % (t["remaining"] / 1e6)
+            active.append("%s — %.1f%%%s%s%s" % (name, prog, eta, eta_txt, cat))
+        elif state in ("uploading", "stalledUP", "forcedUP"):
+            seeding.append("%s — ratio %.2f, %s" % (
+                name, t.get("ratio") or 0, _human_bytes(t.get("uploaded"))))
+    lines = []
+    if active:
+        lines.append("Downloading (%d):" % len(active))
+        lines += ["  • " + a for a in active[:8]]
+    else:
+        lines.append("Nothing downloading right now.")
+    if seeding:
+        lines.append("Seeding (%d), busiest by uploaded:" % len(seeding))
+        lines += ["  • " + s for s in seeding[:5]]
+    return "\n".join(lines)
+
+
+def _human_bytes(num):
+    try:
+        n = float(num)
+    except (TypeError, ValueError):
+        return "0 B"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return "%.1f %s" % (n, unit)
+        n /= 1024
+    return "%.1f PB" % n
+
+
+def cmd_downloads():
+    spec = _media_cfg("qbittorrent")
+    if not spec:
+        return "(qBittorrent is not configured — add it under media_apps)"
+    base = spec["url"].rstrip("/")
+    try:
+        login_req = urllib.request.Request(
+            base + "/api/v2/auth/login",
+            data=urllib.parse.urlencode({
+                "username": spec.get("user", ""),
+                "password": _media_pass("qbittorrent")}).encode())
+        with urllib.request.urlopen(login_req, timeout=15) as resp:
+            cookie = resp.headers.get("Set-Cookie", "").split(";")[0]
+        if not cookie:
+            return "(qBittorrent login failed — check user/password)"
+        torrents = http_get_json(base + "/api/v2/torrents/info",
+                                 headers={"Cookie": cookie})
+        out = fmt_downloads(torrents)
+        audit("downloads", "%d torrents" % len(torrents))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return "(qBittorrent unreachable: %s)" % exc
+
+
+_SEERR_STATUS = {1: "pending approval", 2: "approved — waiting",
+                 3: "available", 4: "refused", 5: "failed"}
+
+
+def fmt_requests(results):
+    if not results:
+        return "No open requests — everything requested has arrived."
+    open_reqs = [r for r in results if r.get("status") not in (3, 5)]
+    if not open_reqs:
+        return "No open requests — everything requested has arrived."
+    lines = ["Open requests (%d):" % len(open_reqs)]
+    for r in open_reqs[:10]:
+        media = r.get("media") or {}
+        title = media.get("title") or "?"
+        who = (r.get("requestedBy") or {}).get("displayName") or "unknown"
+        status = _SEERR_STATUS.get(r.get("status"), str(r.get("status")))
+        kind = "series" if media.get("mediaType") == "tv" else "movie"
+        lines.append("  • %s (%s) — %s — by %s" % (title, kind, status, who))
+    return "\n".join(lines)
+
+
+def cmd_requests():
+    spec = _media_cfg("overseerr")
+    if not spec:
+        return "(Overseerr is not configured — add it under media_apps)"
+    try:
+        data = http_get_json(spec["url"].rstrip("/") + "/api/v1/request?take=20",
+                             key=_media_key("overseerr"))
+        out = fmt_requests(data.get("results") or [])
+        audit("requests", "listed")
+        return out
+    except Exception as exc:  # noqa: BLE001
+        return "(Overseerr unreachable: %s)" % exc
+
+
+def fmt_calendar(sonarr_eps, radarr_movies):
+    from datetime import datetime, timedelta
+    today = datetime.now().date()
+    by_day = {}
+    for ep in sonarr_eps:
+        air = (ep.get("airDateUtc") or "")[:10]
+        series = (ep.get("series") or {}).get("title", "?")
+        label = "%s S%02dE%02d" % (series, ep.get("seasonNumber") or 0,
+                                   ep.get("episodeNumber") or 0)
+        by_day.setdefault(air, []).append(label + " — " + (ep.get("title") or ""))
+    for mv in radarr_movies:
+        for field in ("digitalRelease", "inCinemas", "physicalRelease"):
+            d = (mv.get(field) or "")[:10]
+            if d:
+                by_day.setdefault(d, []).append("%s — %s" % (mv.get("title", "?"), field))
+    lines = []
+    for offset in range(7):
+        day = today + timedelta(days=offset)
+        key = day.isoformat()
+        items = by_day.get(key)
+        if items:
+            label = "today" if offset == 0 else day.strftime("%a %b %d")
+            lines.append("%s:" % label)
+            lines += ["  • " + i for i in items]
+    if not lines:
+        return "Nothing releasing in the next 7 days."
+    return "Releasing in the next 7 days:\n" + "\n".join(lines)
+
+
+def cmd_releases():
+    from datetime import datetime, timedelta
+    today = datetime.now().date().isoformat()
+    end = (datetime.now() + timedelta(days=7)).date().isoformat()
+    parts = []
+    spec = _media_cfg("sonarr")
+    if spec:
+        try:
+            eps = http_get_json(spec["url"].rstrip("/") +
+                                "/api/v3/calendar?start=%s&end=%s" % (today, end),
+                                key=_media_key("sonarr"))
+            parts.append(eps)
+        except Exception as exc:  # noqa: BLE001
+            parts.append([])
+            print("  sonarr calendar failed: %s" % exc, file=sys.stderr)
+    else:
+        parts.append([])
+    spec = _media_cfg("radarr")
+    if spec:
+        try:
+            movies = http_get_json(spec["url"].rstrip("/") +
+                                   "/api/v3/calendar?start=%s&end=%s" % (today, end),
+                                   key=_media_key("radarr"))
+            parts.append(movies)
+        except Exception as exc:  # noqa: BLE001
+            parts.append([])
+    else:
+        parts.append([])
+    if not any(parts):
+        return "(neither Sonarr nor Radarr is configured — add them under media_apps)"
+    out = fmt_calendar(parts[0], parts[1])
+    audit("releases", "7-day window")
+    return out
+
+
+# media probes + commands: registered only when the app is configured
+def register_media_probes():
+    if _media_cfg("qbittorrent"):
+        PROBE_REGISTRY.setdefault(
+            "downloads", ("download queue: active torrents + seeding summary",
+                          "__media__:downloads"))
+    if _media_cfg("overseerr"):
+        PROBE_REGISTRY.setdefault(
+            "requests", ("open Overseerr requests (pending / waiting)",
+                         "__media__:requests"))
+    if _media_cfg("sonarr") or _media_cfg("radarr"):
+        PROBE_REGISTRY.setdefault(
+            "releases", ("movies + episodes releasing in the next 7 days",
+                         "__media__:releases"))
+
+
+def media_fetch(name):
+    if name == "downloads":
+        return cmd_downloads()
+    if name == "requests":
+        return cmd_requests()
+    if name == "releases":
+        return cmd_releases()
+    return "(unknown media probe %s)" % name
+
+
+# ── windows boot/crash log + network throughput ─────────────────────────────
+def win_boot_log():
+    query = ('wevtutil qe System /c:30 /rd:true /f:text /q:'
+             '"*[System[(EventID=41) or (EventID=6005) or (EventID=6006)]]"')
+    out = sh(query, 25)
+    return out.strip()[:2000] or "(no boot events found)"
+
+
+def net_throughput():
+    if IS_WINDOWS:
+        out = sh("powershell -NoProfile -Command \"Get-NetAdapterStatistics | "
+                 "Select-Object Name, ReceivedBytes, SentBytes | "
+                 "Format-Table -AutoSize\"", 20)
+        return out.strip()[:1500] or "(no adapters)"
+    def snapshot():
+        totals = {}
+        for line in open("/proc/net/dev"):
+            if "|" not in line:
+                continue
+            name, rest = line.split(":", 1)
+            fields = rest.split()
+            totals[name.strip()] = (int(fields[0]), int(fields[8]))
+        return totals
+    a = snapshot()
+    time.sleep(2)
+    b = snapshot()
+    lines = []
+    for name in sorted(set(a) | set(b)):
+        rb = b.get(name, (0, 0))[0] - a.get(name, (0, 0))[0]
+        tb = b.get(name, (0, 0))[1] - a.get(name, (0, 0))[1]
+        if rb or tb:
+            lines.append("%s: ↓ %s/s ↑ %s/s" % (
+                name, _human_bytes(rb / 2), _human_bytes(tb / 2)))
+    return "\n".join(lines[:10]) or "(no traffic in sample)"
+
+
+# ── webhook receiver: *arr/plex events -> Signal push ───────────────────────
+WEBHOOK_PORT = CFG.get("webhook_port")
+WEBHOOK_TOKEN = CFG.get("webhook_token", "")
+_webhook_client = [None]
+
+
+def fmt_webhook(kind, payload):
+    """Webhook JSON -> one Signal line, or None to stay quiet."""
+    ev = str(payload.get("event", ""))
+    if kind in ("sonarr", "radarr"):
+        who = payload.get("series") or payload.get("movie") or {}
+        title = who.get("title", "?")
+        eps = ", ".join("S%02dE%02d" % (e.get("seasonNumber", 0),
+                                        e.get("episodeNumber", 0))
+                        for e in (payload.get("episodes") or []))
+        label = {"Grab": "📥 grabbed", "Download": "✅ imported",
+                 "Rename": "📝 renamed"}.get(ev, ev or "event")
+        return "%s — %s: %s %s" % (kind.capitalize(), label, title, eps)
+    if kind == "plex":
+        title = (payload.get("Metadata") or {}).get("title", "?")
+        if ev in ("media.play", "media.resume"):
+            return "▶️ Plex: playback started — %s" % title
+        if ev == "library.new":
+            return "🟣 Plex: new in library — %s" % title
+        return None
+    if kind == "generic":
+        return "🔔 %s" % (payload.get("message") or payload.get("event") or "event")
+    return None
+
+
+def start_webhook_receiver(client):
+    """Optional HTTP endpoint for *arr/Plex webhooks -> Signal push.
+
+    Binds 127.0.0.1 only; off unless webhook_port is set in config."""
+    if not WEBHOOK_PORT:
+        return
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    _webhook_client[0] = client
+
+    class Handler(BaseHTTPRequestHandler):
+        def _reply(self, code, text):
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(text.encode())
+
+        def do_GET(self):
+            self._reply(200, "hongyan webhook receiver")
+
+        def do_POST(self):
+            if WEBHOOK_TOKEN:
+                got = (self.path.split("token=")[-1].split("&")[0]
+                       if "token=" in self.path else
+                       self.headers.get("X-Hongyan-Token", ""))
+                if got != WEBHOOK_TOKEN:
+                    self._reply(403, "bad token")
+                    return
+            kind = self.path.strip("/").split("/")[0] or "generic"
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(min(length, 262144))
+            try:
+                payload = json.loads(body.decode("utf-8", "replace"))
+            except ValueError:
+                self._reply(400, "bad json")
+                return
+            msg = fmt_webhook(kind, payload if isinstance(payload, dict) else {})
+            audit("webhook", "%s %s" % (kind, clip(str(payload), 100)))
+            if msg:
+                try:
+                    _webhook_client[0].send_message(CFG["owner_number"], msg)
+                except Exception as exc:  # noqa: BLE001
+                    audit_fail("webhook_send", str(exc)[:100])
+            self._reply(204, "")
+
+        def log_message(self, *_a):  # route noise to the audit log instead
+            pass
+
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", int(WEBHOOK_PORT)), Handler)
+    except OSError as exc:
+        audit_fail("webhook_bind", str(exc)[:100])
+        return
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    audit("webhook_up", "listening on 127.0.0.1:%s" % WEBHOOK_PORT)
+
+
+register_http_probes(CFG)
+register_media_probes()
+register_media_commands()
+if IS_WINDOWS:
+    PROBE_REGISTRY.setdefault(
+        "boot_log", ("recent boots and crashes (Event Log)", "__win_boot__"))
+    PROBE_REGISTRY.setdefault(
+        "net", ("per-interface throughput sample", "__net__"))
+
+
 def run_probe(name):
     entry = PROBE_REGISTRY.get(name)
     if not entry:
         return None
     _, cmd = entry
+    if cmd.startswith("__http__:"):
+        return http_probe_fetch(cmd.split(":", 1)[1])
+    if cmd.startswith("__media__:"):
+        return media_fetch(cmd.split(":", 1)[1])
+    if cmd == "__win_boot__":
+        return win_boot_log()
+    if cmd == "__net__":
+        return net_throughput()
     if cmd == "__services__":
         return cmd_services()
     if cmd == "__certs__":
@@ -3942,6 +4421,7 @@ def _request_shutdown(signum, _frame):
 def main():
     os.makedirs(STATE_DIR, exist_ok=True)
     client = Client(CFG["socket"])
+    start_webhook_receiver(client)
     audit("start", "listener connected")
     seen = load_seen()
 

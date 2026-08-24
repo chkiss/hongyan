@@ -19,31 +19,93 @@
   "model_timeout_seconds": 600,
   "max_steps": 5,
   "_allowed_units_note": "allowed_units entries are the names you TYPE to the bot; they must match the keys in services below. Delete apps he doesn't run. Verify real service names: powershell Get-Service *plex* (etc.)",
-  "allowed_units": ["plex", "sonarr", "radarr", "prowlarr", "lidarr", "qbt"],
+  "allowed_units": [
+    "plex",
+    "sonarr",
+    "radarr",
+    "prowlarr",
+    "lidarr",
+    "qbt"
+  ],
   "_services_note": "type windows = a Windows service checked via Get-Service; type docker = a container checked via docker inspect (listener needs docker rights). The listener must run elevated (Task Scheduler: highest privileges) for restarts and reboots to work. Service names below are the common installer defaults - verify with Get-Service and delete what he doesn't run.",
   "services": {
-    "plex": { "type": "windows", "unit": "Plex" },
-    "sonarr": { "type": "windows", "unit": "Sonarr" },
-    "radarr": { "type": "windows", "unit": "Radarr" },
-    "prowlarr": { "type": "windows", "unit": "Prowlarr" },
-    "lidarr": { "type": "windows", "unit": "Lidarr" },
-    "qbt": { "type": "windows", "unit": "qBittorrent" }
+    "plex": {
+      "type": "windows",
+      "unit": "Plex"
+    },
+    "sonarr": {
+      "type": "windows",
+      "unit": "Sonarr"
+    },
+    "radarr": {
+      "type": "windows",
+      "unit": "Radarr"
+    },
+    "prowlarr": {
+      "type": "windows",
+      "unit": "Prowlarr"
+    },
+    "lidarr": {
+      "type": "windows",
+      "unit": "Lidarr"
+    },
+    "qbt": {
+      "type": "windows",
+      "unit": "qBittorrent"
+    }
   },
   "_custom_commands_note": "Typed exactly, or reached by synonym. The 10-second delay on reboot is your abort window: 'shutdown /a' cancels it.",
   "custom_commands": {
     "reboot box": {
       "desc": "reboot this machine in 10 seconds",
-      "synonyms": ["reboot", "restart the box", "restart the computer"],
+      "synonyms": [
+        "reboot",
+        "restart the box",
+        "restart the computer"
+      ],
       "command": "shutdown /r /t 10 /c hongyan-reboot",
       "timeout": 10
     },
     "abort reboot": {
       "desc": "cancel a pending reboot",
-      "synonyms": ["cancel reboot", "abort shutdown"],
+      "synonyms": [
+        "cancel reboot",
+        "abort shutdown"
+      ],
       "command": "shutdown /a",
       "timeout": 10
     }
   },
   "monthly_review": "off",
-  "roster_check": false
+  "roster_check": false,
+  "http_probes": {
+    "arr_health": {
+      "desc": "Sonarr health warnings",
+      "url": "http://127.0.0.1:8989/api/v3/health",
+      "key_file": "C:\\\\hongyan\\\\sonarr.key",
+      "path": "[*].message",
+      "empty": "all clear"
+    }
+  },
+  "media_apps": {
+    "qbittorrent": {
+      "url": "http://127.0.0.1:8080",
+      "user": "admin",
+      "pass_file": "C:\\\\hongyan\\\\qbt.pass"
+    },
+    "sonarr": {
+      "url": "http://127.0.0.1:8989",
+      "key_file": "C:\\\\hongyan\\\\sonarr.key"
+    },
+    "radarr": {
+      "url": "http://127.0.0.1:7878",
+      "key_file": "C:\\\\hongyan\\\\radarr.key"
+    },
+    "overseerr": {
+      "url": "http://127.0.0.1:5055",
+      "key_file": "C:\\\\hongyan\\\\overseerr.key"
+    }
+  },
+  "webhook_port": 8686,
+  "webhook_token": ""
 }
