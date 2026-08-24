@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""hongyan-config — toggle what the hongyan bot may see and touch.
+"""hongyan-config — pick what the Hongyan bot may see and restart.
 
 Single-file, stdlib only. Run with no arguments for the interactive menu;
 subcommands for scripting.
 
+Two permissions per service, toggled separately:
+  see     the bot reports the service's state (status, probes)
+  restart the bot restarts it on request (implies see)
+
 The menu keeps one stable list: everything the bot knows about — configured
 services, plus everything a scan has ever found (remembered in config as
-_known_services, which the listener ignores). Toggles flip [x]/[ ] without
-removing rows; 's' writes; 'q' or Ctrl-C discards unsaved changes.
+_known_services, which the listener ignores). 's' writes; 'q' or Ctrl-C
+discards unsaved changes.
 """
 import json
 import os
@@ -45,7 +49,8 @@ def detect():
                "{$_.StartType -eq 'Automatic' -and $_.Status -eq 'Running'} | "
                "Select-Object -First 20 -ExpandProperty Name\"")
         for line in subprocess.run(cmd, shell=True, capture_output=True,
-                                   text=True, timeout=30).stdout.splitlines():
+                                   text=True, timeout=30,
+                                   stdin=subprocess.DEVNULL).stdout.splitlines():
             if line.strip():
                 out.append((line.strip(), "windows", line.strip()))
         return out
@@ -67,7 +72,8 @@ def detect():
     cmd = ("systemctl --user list-units --type=service --state=running "
            "--no-legend --plain 2>/dev/null | awk '{print $1}'")
     for line in subprocess.run(cmd, shell=True, capture_output=True,
-                               text=True, timeout=20).stdout.splitlines():
+                               text=True, timeout=20,
+                               stdin=subprocess.DEVNULL).stdout.splitlines():
         unit = line.strip()
         if unit.endswith(".service"):
             unit = unit[:-8]
@@ -96,15 +102,20 @@ def known_map(cfg):
     return known
 
 
-def enabled_set(cfg):
-    return set(cfg.get("allowed_units") or []) & set(cfg.get("services") or {})
+def see_set(cfg):
+    return set(cfg.get("services") or [])
 
 
-def apply_state(cfg, known, enabled):
-    """Write services + allowed_units from the toggle state, keep _known."""
+def restart_set(cfg):
+    return set(cfg.get("allowed_units") or []) & see_set(cfg)
+
+
+def apply_state(cfg, known, see, restart):
+    """Write services + allowed_units from the permission state, keep _known."""
+    restart = restart & see   # cannot restart what the bot cannot see
     cfg["services"] = {k: {"type": known[k][0], "unit": known[k][1]}
-                       for k in sorted(enabled) if k in known}
-    cfg["allowed_units"] = sorted(enabled)
+                       for k in sorted(see) if k in known}
+    cfg["allowed_units"] = sorted(restart)
     cfg["_known_services"] = {k: {"type": v[0], "unit": v[1]}
                               for k, v in sorted(known.items())}
     cfg["onboarding_done"] = True
@@ -129,38 +140,47 @@ def cli(argv):
     if argv[:1] == ["list"]:
         cfg = load()
         known = known_map(cfg)
-        enabled = enabled_set(cfg)
+        see, restart = see_set(cfg), restart_set(cfg)
         print("config: %s" % CONFIG_PATH)
         for key in sorted(known):
             kind, target = known[key]
-            print("  [%s] %-22s %-8s %s"
-                  % ("x" if key in enabled else " ", key, kind, target))
+            print("  see [%s]  restart [%s]  %-22s %-8s %s"
+                  % ("x" if key in see else " ", "x" if key in restart else " ",
+                     key, kind, target))
         return 0
     if argv[:1] == ["detect"]:
         for key, kind, target in detect():
             print("  %-22s %-8s %s" % (key, kind, target))
         return 0
-    if argv[:1] == ["enable"]:
+
+    cfg = load()
+    known = known_map(cfg)
+    see, restart = see_set(cfg), restart_set(cfg)
+
+    if argv[:1] in (["enable"], ["see"], ["restart"]):
+        mode = argv[0]
         if len(argv) < 2:
-            print("usage: hongyan-config enable NAME [KIND] [TARGET]"); return 2
-        cfg = load()
-        known = known_map(cfg)
+            print("usage: hongyan-config %s NAME [KIND] [TARGET]" % mode); return 2
         key = argv[1]
         known[key] = [argv[2] if len(argv) > 2 else known.get(key, ["system"])[0],
                       argv[3] if len(argv) > 3 else known.get(key, ["", key])[1]]
-        apply_state(cfg, known, enabled_set(cfg) | {key})
+        see.add(key)
+        if mode in ("enable", "restart"):
+            restart.add(key)
+        apply_state(cfg, known, see, restart)
         save(cfg)
         return 0
     if argv[:1] == ["disable"]:
         if len(argv) < 2:
             print("usage: hongyan-config disable NAME"); return 2
-        cfg = load()
-        known = known_map(cfg)
-        apply_state(cfg, known, enabled_set(cfg) - {argv[1]})
+        see.discard(argv[1])
+        restart.discard(argv[1])
+        apply_state(cfg, known, see, restart)
         save(cfg)
         return 0
     print("usage: hongyan-config [list|detect|enable NAME [KIND] [TARGET]|"
-          "disable NAME|path]\nno subcommand starts the interactive menu")
+          "see NAME|restart NAME|disable NAME|path]\n"
+          "no subcommand starts the interactive menu")
     return 2
 
 
@@ -169,26 +189,36 @@ def tui():
     cfg = load()
     known = known_map(cfg)
     sync_from_config(cfg, known)
-    enabled = enabled_set(cfg)
+    see = see_set(cfg)
+    restart = restart_set(cfg)
     dirty = False
 
     def draw():
-        os.system("cls" if IS_WINDOWS else "clear")
+        # clear must not inherit stdin: the ncurses clear child consumes a
+        # buffered line on piped input, silently eating menu keystrokes.
+        subprocess.run("cls" if IS_WINDOWS else "clear", shell=True,
+                       stdin=subprocess.DEVNULL)
         star = _c("33", " *unsaved*") if dirty else ""
-        print(_c("1", "hongyan — what may the bot see and touch?") + star)
+        print(_c("1", "Hongyan — pick what it may see and restart") + star)
         print(_c("3", "config: %s" % CONFIG_PATH))
         print()
+        print("   #  see  restart  service")
         for i, key in enumerate(sorted(known), 1):
             kind, target = known[key]
-            if key in enabled:
-                mark, key_s = _c("32", "[x]"), key
-            else:
-                mark, key_s = _c("90", "[ ]"), _c("90", key)
-            print("  %2d %s %-22s %-8s %s" % (i, mark, key_s, kind, target))
+            s_mark = _c("32", "[x]") if key in see else _c("90", "[ ]")
+            r_mark = (_c("32", "[x]") if key in restart
+                      else _c("90", "[ ]"))
+            key_s = key if key in see else _c("90", key)
+            print("  %2d  %s    %s       %-22s %-8s %s"
+                  % (i, s_mark, r_mark, key_s, kind, target))
         print()
-        print("  <number> toggle   r refresh (adds new finds, enabled)   "
+        print("  <n> toggle see    <n>r toggle restart    r refresh    "
               "n add by hand")
         print("  s save   q quit without saving")
+        print(_c("3", "  see = the bot reports this service's state (status, "
+                 "probes)"))
+        print(_c("3", "  restart = the bot restarts it when you ask "
+                 "(includes see)"))
 
     while True:
         draw()
@@ -202,7 +232,7 @@ def tui():
             print("Bye! Unsaved changes discarded." if dirty else "Bye!")
             return
         if choice == "s":
-            apply_state(cfg, known, enabled)
+            apply_state(cfg, known, see, restart)
             save(cfg)
             dirty = False
             continue
@@ -211,34 +241,45 @@ def tui():
             for key, kind, target in detect():
                 if key not in known:
                     known[key] = [kind, target]
-                    enabled.add(key)
+                    see.add(key)
+                    restart.add(key)
                     fresh += 1
             if fresh:
                 dirty = True
-                print(_c("32", "  %d new service(s) added and enabled" % fresh))
+                print(_c("32", "  Added %d new service(s) (see + restart)."
+                         % fresh))
             else:
-                print("  nothing new running")
-            input("  enter to continue ")
+                print("  Nothing new running.")
             continue
         if choice == "n":
             parts = input("  name kind target: ").split()
             if len(parts) == 3:
                 known[parts[0]] = [parts[1], parts[2]]
-                enabled.add(parts[0])
+                see.add(parts[0])
+                restart.add(parts[0])
                 dirty = True
             continue
-        if choice.isdigit() and 1 <= int(choice) <= len(known):
-            key = sorted(known)[int(choice) - 1]
-            if key in enabled:
-                enabled.discard(key)
+        m = re.fullmatch(r"(\d+)(r?)", choice)
+        if m:
+            idx, want_restart = int(m.group(1)), bool(m.group(2))
+            keys = sorted(known)
+            if not 1 <= idx <= len(keys):
+                continue
+            key = keys[idx - 1]
+            if want_restart:
+                restart ^= {key}
+                if key in restart:
+                    see.add(key)          # restart implies see
             else:
-                enabled.add(key)
+                see ^= {key}
+                if key not in see:
+                    restart.discard(key)  # unseeing revokes restart
             dirty = True
 
 
 def _confirm_discard():
     try:
-        reply = input("  unsaved changes — discard? [y/N] ").strip().lower()
+        reply = input("  Unsaved changes — discard? [y/N] ").strip().lower()
     except (KeyboardInterrupt, EOFError):
         return True
     return reply.startswith("y")
