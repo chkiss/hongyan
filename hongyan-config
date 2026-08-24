@@ -19,6 +19,9 @@ import re
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 import time
 
 CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
@@ -315,6 +318,132 @@ def basics_screen(cfg):
             print(_c("32", "  Set (unsaved)."))
 
 
+# ── credential collection: key/pass files, prompted and written ─────────────
+SECRET_HINTS = [
+    ("sonarr", "API key", "Sonarr → Settings → General → API Key"),
+    ("radarr", "API key", "Radarr → Settings → General → API Key"),
+    ("overseerr", "API key", "Overseerr → Settings → General → API Key"),
+    ("qbt", "WebUI password", "qBittorrent → Options → Web UI (same page as the username)"),
+]
+
+
+def _secret_hint(path):
+    low = path.lower()
+    for needle, what, where in SECRET_HINTS:
+        if needle in low:
+            return what, where
+    return ("API key or password",
+            "the app's settings page (look for API Key or Web UI password)")
+
+
+def missing_secret_files(cfg):
+    """(section, app, field, path) for every key/pass file referenced but
+    not on disk. Deduplicated by path — sonarr.key serves two config spots."""
+    wanted, seen = [], set()
+    for section in ("media_apps", "http_probes"):
+        for app, spec in (cfg.get(section) or {}).items():
+            if not isinstance(spec, dict):
+                continue
+            for field in ("key_file", "pass_file"):
+                path = spec.get(field)
+                if path and not os.path.exists(os.path.expanduser(path)) \
+                        and path not in seen:
+                    seen.add(path)
+                    wanted.append((section, app, field, path))
+    return wanted
+
+
+def _secret_check(section, app, spec, field, value):
+    """Live-validate a credential against its own app.
+
+    Returns (ok, detail, reachable). A wrong key is a hard fail (retry); an
+    unreachable app is a soft fail (the key may still be fine)."""
+    spec = spec or {}
+    base = (spec.get("url") or "").rstrip("/")
+    try:
+        if field == "pass_file":
+            login = urllib.request.Request(
+                base + "/api/v2/auth/login",
+                data=urllib.parse.urlencode({
+                    "username": spec.get("user", "admin"),
+                    "password": value}).encode())
+            with urllib.request.urlopen(login, timeout=10) as resp:
+                ok = resp.read().decode().strip() == "Ok."
+            return ok, ("" if ok else "qBittorrent rejected that password"), True
+        test_paths = {"sonarr": "/api/v3/system/status",
+                      "radarr": "/api/v3/system/status",
+                      "overseerr": "/api/v1/settings"}
+        path = test_paths.get(app) or ""
+        url = base + path if base else spec.get("url", "")
+        header = spec.get("key_header", "X-Api-Key")
+        req = urllib.request.Request(url)
+        req.add_header(header, value)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return True, "", True
+    except urllib.error.HTTPError as exc:
+        return False, "%s rejected the value (HTTP %d)" % (app, exc.code), True
+    except OSError as exc:
+        return True, "could not reach %s to check (%s)" % (app, exc), False
+
+
+def collect_secrets(cfg):
+    """Prompt for each missing credential file and write it (mode 600).
+    Enter on an empty line skips that one — its probe will say so."""
+    wanted = missing_secret_files(cfg)
+    if not wanted:
+        return
+    print(_c("1", "Credentials"))
+    print(_c("3", "Stored as files so the keys never sit inside the config."))
+    for section, app, field, path in wanted:
+        what, where = _secret_hint(path)
+        print()
+        print("  %s — %s" % (app, what))
+        print(_c("3", "  find it: %s" % where))
+        spec = (cfg.get(section) or {}).get(app) or {}
+        full = os.path.expanduser(path)
+        parent = os.path.dirname(full)
+        while True:
+            val = input("  paste value (Enter to skip): ").strip()
+            if not val:
+                print(_c("33", "  skipped — %s will say so until the file exists" % app))
+                break
+            if os.environ.get("HONGYAN_SKIP_VALIDATE") == "1":
+                ok, detail, reachable = True, "validation skipped", True
+            else:
+                ok, detail, reachable = _secret_check(
+                    section, app, spec, field, val)
+            parent = parent or "."
+            os.makedirs(parent, exist_ok=True)
+            with open(full, "w") as fh:
+                fh.write(val)
+            try:
+                os.chmod(full, 0o600)
+            except OSError:
+                pass
+            if ok:
+                if reachable:
+                    print(_c("32", "  wrote %s — verified" % full))
+                else:
+                    print(_c("33", "  wrote %s — kept (%s)" % (full, detail)))
+                break
+            if not reachable:
+                # the app being down says nothing about the value
+                print(_c("33", "  " + detail))
+                if _confirm("Keep it anyway?", True):
+                    print(_c("32", "  kept %s" % full))
+                    break
+                os.remove(full)
+                continue
+            print(_c("31", "  " + detail))
+            retry = input("  paste again, or Enter to skip: ").strip()
+            if not retry:
+                os.remove(full)
+                print(_c("33", "  skipped — %s will say so until the file exists" % app))
+                break
+            val = retry
+
+
 # ── auto-update toggle ───────────────────────────────────────────────────────
 AUTO_CRON = "hongyan-autoupdate"
 
@@ -533,6 +662,7 @@ def install_flow():
     # services: the scan-and-toggle screen
     services_screen(cfg)
     cfg = load()
+    collect_secrets(cfg)
 
     # link commands + cron (Linux only; Windows uses scheduled tasks per doc)
     if not IS_WINDOWS:
@@ -642,6 +772,9 @@ def cli(argv):
     if argv[:1] == ["detect"]:
         for key, kind, target in detect():
             print("  %-22s %-8s %s" % (key, kind, target))
+        return 0
+    if argv[:1] == ["collect"]:
+        collect_secrets(load())
         return 0
     if argv[:1] == ["basics"]:
         cfg = load()
