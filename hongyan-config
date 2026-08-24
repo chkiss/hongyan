@@ -369,10 +369,10 @@ def basics_fields(cfg):
          "bot_account or note_to_self"),
         ("bot_number", "the BOT's own Signal number",
          cfg.get("bot_number", ""), lambda v: bool(E164_RE.match(v)),
-         "+E.164, e.g. +15550000002 — must differ from owner_number"),
+         "+E.164 with your country code (any country) — must differ from owner_number"),
         ("owner_number", "your phone number",
          cfg.get("owner_number", ""), lambda v: bool(E164_RE.match(v)),
-         "+E.164, e.g. +15550000001"),
+         "+E.164 with your country code (any country)"),
         ("owner_aci", "your ACI (the only key that authorizes you)",
          cfg.get("owner_aci", ""), lambda v: bool(UUID_RE.match(v)),
          "UUID, e.g. 3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
@@ -586,7 +586,8 @@ def autoupdate_state():
 
 def autoupdate_set(on, lines=None):
     """Add/remove the autoupdate cron line. `lines` overrides the crontab
-    content (for testing). Returns the new crontab content."""
+    content (for testing: dry-run, returns the would-be crontab)."""
+    testing = lines is not None
     if lines is None:
         lines = subprocess.run("crontab -l 2>/dev/null", shell=True,
                                capture_output=True, text=True,
@@ -608,13 +609,12 @@ def autoupdate_set(on, lines=None):
     new = "\n".join(kept).lstrip("\n")
     if not new.endswith("\n"):
         new += "\n"
-    if lines is None:
-        p = subprocess.run("crontab -", shell=True, input=new,
-                           capture_output=True, text=True,
-                           stdin=subprocess.DEVNULL)
-        if p.returncode:
-            print(_c("31", "  crontab write failed: %s" % p.stderr.strip()))
-            return lines
+    if testing:
+        return new
+    p = subprocess.run("crontab -", shell=True, input=new,
+                       capture_output=True, text=True)
+    if p.returncode:
+        print(_c("31", "  crontab write failed: %s" % p.stderr.strip()))
     return new
 
 

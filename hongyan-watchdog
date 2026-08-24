@@ -132,23 +132,35 @@ print(os.path.expanduser(cfg.get("attachment_dir")
     ATT_DIR="${ATT_DIR:-$HOME/.local/share/signal-cli/attachments}"
     find "$ATT_DIR" -type f -mtime +14 -delete 2>/dev/null
 
-    # Model-dependency check, gated by roster_check in the config (off =
-    # zero scheduled provider contact, the original default). When on: one
-    # lightweight catalog request a day, so a model that left the free tier
-    # is reported before answers start failing — not discovered mid-chat.
-    # The queue digest is still not sent here: it is offered in conversation,
-    # after a message the owner sent.
-    if /usr/bin/python3 -c '
-import json, os, sys
+    # Daily bench digest — purely local: reads model_state.json, makes no
+    # provider request at all. A chain model sitting on the bench is one
+    # line a day; anything harder than a temporary limit already alerted
+    # the moment it happened. Temporary benches self-expire quietly.
+    bench_report="$(/usr/bin/python3 -c '
+import json, os, sys, time
 cfg = json.load(open(os.path.expanduser("~/.config/hongyan/config.json")))
-sys.exit(0 if cfg.get("roster_check") else 1)' 2>/dev/null; then
-        report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
-        if [ -n "$report" ]; then
-            printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
-            log "daily model check: DEPENDENCY MISSING, alerted"
-        else
-            log "daily model check: ok"
-        fi
+state = json.load(open(os.path.expanduser("~/.config/hongyan/model_state.json")))
+chains = set(cfg.get("text_chain") or []) | set(cfg.get("vision_chain") or [])
+mc = cfg.get("model_classify")
+if mc:
+    chains.add(mc)
+now = time.time()
+for m in sorted(chains & set(state)):
+    b = state[m]
+    until = b.get("until")
+    if until is not None and until < now:
+        continue
+    when = ("retry in ~%dm" % max(0, int((until - now) / 60))
+            if until and until - now < 7200 else
+            "until " + time.strftime("%b %d %H:%M", time.localtime(until))
+            if until else "until a human clears it")
+    print("%s — %s (%s)" % (m, b.get("why", "")[:60], when))
+' 2>>"$LOG")"
+    if [ -n "$bench_report" ]; then
+        printf 'Benched models on this box:\n%s' "$bench_report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
+        log "daily bench digest: sent"
+    else
+        log "daily bench digest: all chain models clear"
     fi
 
     if [ "${#problems[@]}" -eq 0 ]; then
