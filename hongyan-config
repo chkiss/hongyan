@@ -234,7 +234,7 @@ def services_screen(cfg):
                   + star)
             print(_c("3", "config: %s" % CONFIG_PATH))
             print()
-            print("   #  see  restart  service")
+            print("   #  see  commands/restart  service")
             for parent in parents:
                 kind, target = known[parent]
                 s_mark = _c("32", "[x]") if parent in see else _c("90", "[ ]")
@@ -258,6 +258,12 @@ def services_screen(cfg):
                         s_mark = _c("90", " — ")
                         r_mark = (_c("32", "[x]") if key in restart
                                   else _c("90", "[ ]"))
+                    elif kind == "command":
+                        # a command is an action: the toggle lives in the
+                        # commands/restart column, not under see
+                        s_mark = _c("90", " — ")
+                        r_mark = (_c("32", "[x]") if key in see
+                                  else _c("90", "[ ]"))
                     else:
                         s_mark = (_c("32", "[x]") if key in see
                                   else _c("90", "[ ]"))
@@ -271,8 +277,10 @@ def services_screen(cfg):
                   "sub-items below a service)")
             print("  jobs: <n> toggles run-now.   r refresh    n add by hand")
             print("  s save    q quit without saving")
-            print(_c("3", "  See = the bot reports it. Restart = the bot "
-                     "restarts it when you ask."))
+            print(_c("3", "  see = the bot reports state: status, probes, "
+                     "downloads, requests, releases"))
+            print(_c("3", "  commands/restart = the bot acts when you ask: "
+                     "\"restart plex\", run a job, \"abort reboot\""))
 
         draw()
         try:
@@ -369,10 +377,10 @@ def basics_fields(cfg):
          "bot_account or note_to_self"),
         ("bot_number", "the BOT's own Signal number",
          cfg.get("bot_number", ""), lambda v: bool(E164_RE.match(v)),
-         "+E.164 with your country code (any country) — must differ from owner_number"),
+         "your number with country code, starting with + — must differ from owner_number"),
         ("owner_number", "your phone number",
          cfg.get("owner_number", ""), lambda v: bool(E164_RE.match(v)),
-         "+E.164 with your country code (any country)"),
+         "your number with country code, starting with +"),
         ("owner_aci", "your ACI (the only key that authorizes you)",
          cfg.get("owner_aci", ""), lambda v: bool(UUID_RE.match(v)),
          "UUID, e.g. 3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
