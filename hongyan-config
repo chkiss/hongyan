@@ -16,8 +16,10 @@ discards unsaved changes.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 
 CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
 STATE_DIR = os.path.dirname(CONFIG_PATH)
@@ -385,15 +387,226 @@ def autoupdate_screen(cfg):
 
 
 # ── main menu ────────────────────────────────────────────────────────────────
+# ── install flow (ported from install.sh — one implementation, one entry) ───
+def is_installed():
+    return os.path.exists(CONFIG_PATH)
+
+
+def repo_dir():
+    return os.path.dirname(os.path.realpath(__file__))
+
+
+def bin_dir():
+    return os.path.expanduser("~/.local/bin")
+
+
+def cron_lines():
+    return subprocess.run("crontab -l 2>/dev/null", shell=True,
+                          capture_output=True, text=True,
+                          stdin=subprocess.DEVNULL).stdout
+
+
+def add_cron(schedule, command, comment):
+    current = cron_lines()
+    if command in current:
+        print("  cron already has: %s" % command)
+        return
+    lines = [l for l in current.splitlines()]
+    lines += ["# " + comment, schedule + " " + command]
+    subprocess.run("crontab -", shell=True, input="\n".join(lines) + "\n",
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    print("  cron: %s %s" % (schedule, command))
+
+
+def _ask(prompt, default=""):
+    suffix = " [%s]: " % default if default else ": "
+    val = input("  " + prompt + suffix).strip()
+    return val or default
+
+
+def _ask_valid(prompt, pattern, hint, default=""):
+    for _ in range(3):
+        val = _ask(prompt, default)
+        if re.match(pattern, val):
+            return val
+        print("  " + hint)
+    if _confirm("Use %r anyway?" % val):
+        return val
+    return _ask_valid(prompt, pattern, hint, default)
+
+
+def _confirm(prompt, default=False):
+    suffix = " [Y/n]: " if default else " [y/N]: "
+    try:
+        reply = input("  %s%s" % (prompt, suffix)).strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return False
+    if not reply:
+        return default
+    return reply.startswith("y")
+
+
+NOTE_TO_SELF_WARNING = """
+  READ THIS BEFORE CHOOSING NOTE TO SELF
+
+  hongyan would be linked as a device on your own Signal account, the same
+  way Signal Desktop is. A linked device receives a copy of EVERY
+  conversation you have — not just Note to Self — and can send messages as
+  you, to anyone.
+
+  If this server is compromised, your whole Signal identity goes with it.
+
+  With a separate bot account, the worst case is a spare number that only
+  ever talks to you.
+"""
+
+
+def install_flow():
+    repo = repo_dir()
+    print(_c("1", "Hongyan installer"))
+    if IS_WINDOWS:
+        print(_c("33", "  Windows: signal-cli and Java setup is manual — see "
+                 "INSTALL-WINDOWS.md in %s" % repo))
+        print(_c("33", "  This flow will create the config and pick services; "
+                 "scheduled tasks are in the doc."))
+    shape = _ask("Setup — one device, or server + review host? (1/2)", "1")
+    if shape in ("2", "two", "Two", "TWO"):
+        role = _ask("Which machine is this? (s=server / r=review host)", "s")
+        if role in ("r", "R", "review"):
+            script = os.path.join(repo, "install-review-host.sh")
+            if os.path.exists(script):
+                os.system('bash "%s"' % script)
+            else:
+                os.system('curl -fsSL https://raw.githubusercontent.com/chkiss/'
+                          'hongyan/main/install-review-host.sh | bash')
+            return
+
+    if not IS_WINDOWS:
+        print("  Checking prerequisites")
+        if not os.path.exists("/usr/bin/signal-cli") and not shutil.which("signal-cli") \
+                and not os.path.exists(os.path.expanduser("~/.local/bin/signal-cli")):
+            print(_c("33", "  ! signal-cli not found — install it from "
+                     "github.com/AsamK/signal-cli and register the BOT's number "
+                     "before starting."))
+        else:
+            print(_c("32", "  ok signal-cli found"))
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if not IS_WINDOWS:
+        os.makedirs(bin_dir(), exist_ok=True)
+
+    # config: keep, backup+recreate, or create fresh
+    if is_installed():
+        if _confirm("Config already exists — keep it as is?"):
+            print("  keeping existing config")
+        else:
+            bak = CONFIG_PATH + ".bak-" + time.strftime("%F-%H%M%S")
+            os.replace(CONFIG_PATH, bak)
+            print("  backed up existing config to " + bak)
+            _fresh_config(repo)
+    else:
+        _fresh_config(repo)
+
+    cfg = load()
+
+    # transport decision with the full warning (mirrors the old installer)
+    if cfg.get("transport", "bot_account") == "note_to_self":
+        print(NOTE_TO_SELF_WARNING)
+        if not _confirm("I understand, and want Note to Self anyway"):
+            cfg["transport"] = "bot_account"
+            print("  Keeping the separate bot account. Good call.")
+
+    # identity: the basics screen, then hard-validate what the bot needs
+    while True:
+        basics_screen(cfg)
+        missing = []
+        if not UUID_RE.match(str(cfg.get("owner_aci", ""))):
+            missing.append("owner_aci (your UUID)")
+        if not E164_RE.match(str(cfg.get("owner_number", ""))):
+            missing.append("owner_number (your E.164 number)")
+        if cfg.get("transport", "bot_account") == "bot_account" and \
+                not E164_RE.match(str(cfg.get("bot_number", ""))):
+            missing.append("bot_number (the bot's own E.164 number)")
+        if not missing:
+            break
+        print(_c("33", "  Still missing/invalid: %s" % "; ".join(missing)))
+
+    # services: the scan-and-toggle screen
+    services_screen(cfg)
+    cfg = load()
+
+    # link commands + cron (Linux only; Windows uses scheduled tasks per doc)
+    if not IS_WINDOWS:
+        print("  Linking commands into " + bin_dir())
+        for f in ("hongyan_listener.py", "hongyan-lib.sh", "hongyan-supervise",
+                  "hongyan-watchdog", "hongyan-autoupdate", "hongyan-send.py",
+                  "hongyan-me", "hongyan-monthly-review", "hongyan-stt",
+                  "hongyan-config"):
+            src_f = os.path.join(repo, f)
+            if not os.path.exists(src_f):
+                continue
+            dst = os.path.join(bin_dir(), f)
+            if os.path.exists(dst) and not os.path.islink(dst):
+                os.replace(dst, dst + ".pre-install")
+                print("  moved existing %s to %s.pre-install" % (f, f))
+            if os.path.islink(dst):
+                os.remove(dst)
+            os.symlink(src_f, dst)
+            os.chmod(src_f, 0o755)
+        print(_c("32", "  symlinked to the repository — git pull updates the "
+                 "running system"))
+
+        print("  Scheduling")
+        if _confirm("Install the keep-alive cron (start at boot + watchdog)?", True):
+            add_cron("@reboot", "sleep 30 && %s/hongyan-supervise" % bin_dir(),
+                     "Start at boot")
+            add_cron("*/10 * * * *", "%s/hongyan-watchdog --restart" % bin_dir(),
+                     "Quiet restart if it dies")
+            add_cron("23 8 * * *", "%s/hongyan-watchdog --daily" % bin_dir(),
+                     "Daily health check")
+        if _confirm("Pull updates from GitHub automatically (every 15 min)?", True):
+            autoupdate_set(True)
+            print("  Silent on success; alerts over Signal if an update fails.")
+        else:
+            print("  Update by hand with: git -C %s pull" % repo)
+
+    print("  Running the test suite")
+    tests = os.path.join(repo, "tests", "test_listener.py")
+    t = subprocess.run([sys.executable, tests], capture_output=True,
+                       text=True, stdin=subprocess.DEVNULL)
+    print(_c("32", "  ok test suite passes") if t.returncode == 0
+          else _c("33", "  ! test suite failed — run it to see why"))
+
+    print()
+    print(_c("1", "Install complete."))
+    if not IS_WINDOWS:
+        print("  Start it with: %s/hongyan-supervise" % bin_dir())
+    print("  Then text the bot 'status' from the phone whose ACI you configured.")
+    print("  Re-run hongyan-config any time to tune services or basics.")
+
+
+def _fresh_config(repo):
+    example = os.path.join(repo, "config.example.json")
+    cfg = {}
+    if os.path.exists(example):
+        with open(example) as fh:
+            cfg = json.load(fh)
+    # a fresh install describes no services yet: the scan and the owner do that
+    cfg["services"] = {}
+    cfg["allowed_units"] = []
+    cfg.pop("_known_services", None)
+    cfg["onboarding_done"] = False
+    save(cfg)
+
+
 def main_menu():
     while True:
         run("cls" if IS_WINDOWS else "clear")
         print(_c("1", "Hongyan config"))
         print(_c("3", "config: %s" % CONFIG_PATH))
         print()
-        print("  1  services & permissions   (what the bot may see/restart)")
+        print("  3  services & permissions   (what the bot may see/restart)")
         print("  2  Signal & API basics      (numbers, ACI, transport, key)")
-        print("  3  auto-update              (cron fast-forward, Linux)")
+        print("  1  auto-update              (cron fast-forward, Linux)")
         print("  q  quit")
         try:
             choice = input("> ").strip().lower()
@@ -402,26 +615,12 @@ def main_menu():
         if choice == "q":
             print("Bye!")
             return
-        if choice == "1":
+        if choice == "3":
             services_screen(load())
         elif choice == "2":
-            cfg = load()
-            basics_screen(cfg)
-            if _confirm_save_basics(cfg):
-                save(cfg)
-        elif choice == "3":
+            basics_screen(load())
+        elif choice == "1":
             autoupdate_screen(load())
-
-
-def _confirm_save_basics(cfg):
-    try:
-        reply = input("  Save basics now? [Y/n] ").strip().lower()
-    except (KeyboardInterrupt, EOFError):
-        reply = ""
-    if reply.startswith("n"):
-        print("  Discarded.")
-        return False
-    return True
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -490,4 +689,13 @@ def cli(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main_menu() if len(sys.argv) <= 1 else cli(sys.argv[1:]))
+    if "--install" in sys.argv[1:]:
+        install_flow()
+    elif len(sys.argv) <= 1:
+        if is_installed():
+            main_menu()
+        else:
+            print(_c("33", "Hongyan is not installed on this machine yet."))
+            install_flow()
+    else:
+        sys.exit(cli(sys.argv[1:]))
