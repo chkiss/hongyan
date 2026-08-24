@@ -1,0 +1,44 @@
+{
+  "_comment": "Windows template for hongyan. Copy to %USERPROFILE%\\.config\\hongyan\\config.json and fill in every UPPERCASE placeholder. The ACI is the only authentication - Signal validates it cryptographically; get yours by texting the bot once and reading the 'rejected' line in the audit log, or from Signal's own account settings.",
+  "bot_number": "+1BOTNUMBER",
+  "owner_number": "+1OWNERNUMBER",
+  "owner_aci": "PASTE-OWNER-ACI-UUID",
+  "socket": "127.0.0.1:7583",
+  "transport": "bot_account",
+  "max_message_age_seconds": 900,
+  "burst_count": 5,
+  "burst_window_seconds": 60,
+  "cooldown_seconds": 300,
+  "cooldown_max_seconds": 1800,
+  "api_base": "https://opencode.ai/zen/v1",
+  "model_classify": "upstage/solar-pro4:free",
+  "model_answer": "tencent/hy3:free",
+  "model_vision": "stepfun/step-3.7-flash:free",
+  "attachment_dir": "C:\\Users\\YOU\\signal-cli-attachments",
+  "max_image_bytes": 8000000,
+  "model_timeout_seconds": 600,
+  "max_steps": 5,
+  "_allowed_units_note": "Windows service names restartable by voice. Find the exact name: powershell Get-Service *plex*",
+  "allowed_units": ["Plex"],
+  "_services_note": "type windows = a Windows service checked via Get-Service. The listener must run elevated (Task Scheduler: highest privileges) for restarts and reboots to work.",
+  "services": {
+    "plex": { "type": "windows", "unit": "Plex" }
+  },
+  "_custom_commands_note": "Typed exactly, or reached by synonym. The 10-second delay on reboot is your abort window: 'shutdown /a' cancels it.",
+  "custom_commands": {
+    "reboot box": {
+      "desc": "reboot this machine in 10 seconds",
+      "synonyms": ["reboot", "restart the box", "restart the computer"],
+      "command": "shutdown /r /t 10 /c hongyan-reboot",
+      "timeout": 10
+    },
+    "abort reboot": {
+      "desc": "cancel a pending reboot",
+      "synonyms": ["cancel reboot", "abort shutdown"],
+      "command": "shutdown /a",
+      "timeout": 10
+    }
+  },
+  "monthly_review": "off",
+  "roster_check": false
+}

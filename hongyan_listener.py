@@ -29,6 +29,7 @@ import html
 import ipaddress
 import json
 import os
+import platform
 import queue as queuelib
 import re
 import shlex
@@ -537,6 +538,9 @@ def check_burst(seen):
 # shell helpers — every command here is a fixed literal, never built from input
 # --------------------------------------------------------------------------
 
+IS_WINDOWS = platform.system() == "Windows"
+
+
 def sh(cmd, timeout=25):
     try:
         out = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
@@ -577,8 +581,15 @@ def unit_state(name):
     kind, target = PROBES.get(name, ("system", name))
 
     if kind == "port":
-        listening = sh("ss -lnt 2>/dev/null | grep -c ':%s '" % target, 10)
+        if IS_WINDOWS:
+            listening = sh("netstat -an | find /c \":%s \"" % target, 10)
+        else:
+            listening = sh("ss -lnt 2>/dev/null | grep -c ':%s '" % target, 10)
         return "%s: %s" % (name, "up" if listening.strip() not in ("", "0") else "down")
+
+    if kind == "windows":
+        state = sh("powershell -NoProfile -Command \"(Get-Service -Name '%s' -ErrorAction SilentlyContinue).Status\"" % target, 20)
+        return "%s: %s" % (name, state.strip() or "not installed")
 
     # NB: `systemctl is-active` exits non-zero for anything not active, so a
     # `|| echo unknown` fallback would append a second line to a real answer.
@@ -593,6 +604,12 @@ def unit_state(name):
 # --------------------------------------------------------------------------
 
 def cmd_status():
+    if IS_WINDOWS:
+        up = sh("powershell -NoProfile -Command \"(Get-CimInstance Win32_OperatingSystem).LastBootUpTime\"", 20)
+        disk = sh("powershell -NoProfile -Command \"$c=Get-PSDrive C; 'disk {0:P0} used' -f ($c.Used/($c.Used+$c.Free))\"", 20)
+        mem = sh("powershell -NoProfile -Command \"$o=Get-CimInstance Win32_OperatingSystem; 'mem {0:N1} GB free of {1:N1}' -f ($o.FreePhysicalMemory/1MB), ($o.TotalVisibleMemorySize/1MB)\"", 20)
+        failed = sh("powershell -NoProfile -Command \"@(Get-Service | Where-Object {$_.StartType -eq 'Automatic' -and $_.Status -ne 'Running'}).Count\"", 20)
+        return "%s\n%s\n%s\nfailed services: %s" % (up, disk, mem, failed)
     up = sh("uptime -p", 10)
     load = sh("cut -d' ' -f1-3 /proc/loadavg", 10)
     disk = sh("df -h / | awk 'NR==2{print $5\" used, \"$4\" free\"}'", 10)
@@ -612,6 +629,8 @@ def cmd_status():
 
 
 def cmd_disk():
+    if IS_WINDOWS:
+        return sh("powershell -NoProfile -Command \"Get-PSDrive -PSProvider FileSystem | ForEach-Object {'{0} {1:P0} used, {2:N1} GB free' -f $_.Name, ($_.Used/($_.Used+$_.Free)), ($_.Free/1GB)}\"", 20)
     # -x tmpfs/devtmpfs and one line per real filesystem; / and /home are the
     # same device here, so listing both would print it twice.
     return sh("df -h -x tmpfs -x devtmpfs -x overlay --output=target,pcent,avail "
@@ -623,6 +642,8 @@ def cmd_services():
 
 
 def cmd_certs():
+    if IS_WINDOWS:
+        return "(no certificate monitoring on this platform)"
     out = sh("for f in /etc/letsencrypt/live/*/cert.pem; do "
              "[ -f \"$f\" ] || continue; "
              "d=$(basename $(dirname $f)); "
@@ -1193,11 +1214,15 @@ for _name, _fn in CUSTOM_COMMANDS.items():
 
 def t2_restart(arg):
     unit = (arg or "").strip()
-    # Only user units are restartable: system units need root, and `ch` sudo
-    # requires a password, so offering nginx here would just fail confusingly.
+    # Linux: only user units are restartable — system units need root, and
+    # `ch` sudo requires a password, so offering nginx here would just fail
+    # confusingly. Windows runs the listener elevated, so any service goes.
     if unit not in CFG["allowed_units"]:
         return "refused: '%s' is not restartable. allowed: %s" % (unit, ", ".join(CFG["allowed_units"]))
-    sh("systemctl --user restart %s" % unit, 40)
+    if IS_WINDOWS:
+        sh("powershell -NoProfile -Command \"Restart-Service -Name '%s' -Force\"" % unit, 90)
+    else:
+        sh("systemctl --user restart %s" % unit, 40)
     time.sleep(2)
     return "restarted %s -> %s" % (unit, unit_state(unit))
 
@@ -2499,6 +2524,34 @@ for _name, _spec in (CFG.get("custom_probes") or {}).items():
         continue
     PROBE_REGISTRY[_name] = (_spec.get("desc", _name), _spec["command"])
 
+if IS_WINDOWS:
+    # Windows equivalents for the platform-bound probes — same names, so the
+    # model's vocabulary does not change between hosts. Entries with no sane
+    # equivalent here (apt updates, certbot certs) are simply absent.
+    PROBE_REGISTRY.update({
+        "disk": ("disk usage per drive",
+                 "powershell -NoProfile -Command \"Get-PSDrive -PSProvider FileSystem | ForEach-Object {'{0} {1:P0} used, {2:N1} GB free' -f $_.Name, ($_.Used/($_.Used+$_.Free)), ($_.Free/1GB)}\""),
+        "memory": ("RAM use",
+                   "powershell -NoProfile -Command \"$o=Get-CimInstance Win32_OperatingSystem; 'mem {0:N1} GB free of {1:N1}' -f ($o.FreePhysicalMemory/1MB), ($o.TotalVisibleMemorySize/1MB)\""),
+        "uptime": ("how long the machine has been up",
+                   "powershell -NoProfile -Command \"'up since ' + (Get-CimInstance Win32_OperatingSystem).LastBootUpTime\""),
+        "os": ("Windows edition and version",
+               "powershell -NoProfile -Command \"$o=Get-CimInstance Win32_OperatingSystem; $o.Caption + ' ' + $o.Version\""),
+        "cpu": ("CPU model and core count",
+                "powershell -NoProfile -Command \"$p=Get-CimInstance Win32_Processor; $p.Name + ' ' + $p.NumberOfCores + ' cores'\""),
+        "failed_units": ("autostart services that are not running",
+                         "powershell -NoProfile -Command \"Get-Service | Where-Object {$_.StartType -eq 'Automatic' -and $_.Status -ne 'Running'} | Select-Object -First 10 -ExpandProperty Name\""),
+        "listening_ports": ("which ports are listening",
+                            "powershell -NoProfile -Command \"Get-NetTCPConnection -State Listen | Select-Object -First 20 -ExpandProperty LocalPort | Sort-Object -Unique\""),
+        "connections": ("count of established connections",
+                        "powershell -NoProfile -Command \"@(Get-NetTCPConnection -State Established).Count\""),
+        "logged_in": ("who is logged in", "query user"),
+        "error_count": ("number of system error events in the last 24h",
+                        "powershell -NoProfile -Command \"@(Get-WinEvent -FilterHashtable @{LogName='System'; Level=2; StartTime=(Get-Date).AddHours(-24)} -ErrorAction SilentlyContinue).Count\""),
+        "cron_jobs": ("the scheduled task list",
+                      "schtasks /query /fo csv 2>nul | find /c /v \"\""),
+    })
+
 MAX_PROBES = 4
 
 
@@ -3547,6 +3600,18 @@ class TypingIndicator:
         return False
 
 
+def parse_socket_target(spec):
+    """CFG["socket"] is a unix socket path — unless it ends in host:port with
+    an all-numeric port, which selects the TCP transport signal-cli's daemon
+    offers via --tcp. Windows deployments use TCP; requiring a numeric port
+    after the last colon keeps windows-style paths (C:\foo) on the unix
+    branch."""
+    head, _, port = spec.rpartition(":")
+    if head and port.isdigit():
+        return "tcp", (head, int(port))
+    return "unix", spec
+
+
 class Client:
     # Reconnecting inline (bridge-style) replaces dying-and-waiting: any
     # signal-cli hiccup used to end the process and leave the bot dark until
@@ -3570,8 +3635,13 @@ class Client:
         self._connect()
 
     def _connect(self):
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self.sock.connect(self.path)
+        kind, target = parse_socket_target(self.path)
+        if kind == "tcp":
+            self.sock = socket.create_connection(target, timeout=10)
+            self.sock.settimeout(None)
+        else:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.sock.connect(self.path)
         self.buf = b""
 
     def _rpc(self, method, params, want_result=False):
