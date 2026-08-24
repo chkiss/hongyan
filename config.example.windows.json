@@ -18,11 +18,16 @@
   "max_image_bytes": 8000000,
   "model_timeout_seconds": 600,
   "max_steps": 5,
-  "_allowed_units_note": "Windows service names restartable by voice. Find the exact name: powershell Get-Service *plex*",
-  "allowed_units": ["Plex"],
-  "_services_note": "type windows = a Windows service checked via Get-Service. The listener must run elevated (Task Scheduler: highest privileges) for restarts and reboots to work.",
+  "_allowed_units_note": "allowed_units entries are the names you TYPE to the bot; they must match the keys in services below. Delete apps he doesn't run. Verify real service names: powershell Get-Service *plex* (etc.)",
+  "allowed_units": ["plex", "sonarr", "radarr", "prowlarr", "lidarr", "qbt"],
+  "_services_note": "type windows = a Windows service checked via Get-Service; type docker = a container checked via docker inspect (listener needs docker rights). The listener must run elevated (Task Scheduler: highest privileges) for restarts and reboots to work. Service names below are the common installer defaults - verify with Get-Service and delete what he doesn't run.",
   "services": {
-    "plex": { "type": "windows", "unit": "Plex" }
+    "plex": { "type": "windows", "unit": "Plex" },
+    "sonarr": { "type": "windows", "unit": "Sonarr" },
+    "radarr": { "type": "windows", "unit": "Radarr" },
+    "prowlarr": { "type": "windows", "unit": "Prowlarr" },
+    "lidarr": { "type": "windows", "unit": "Lidarr" },
+    "qbt": { "type": "windows", "unit": "qBittorrent" }
   },
   "_custom_commands_note": "Typed exactly, or reached by synonym. The 10-second delay on reboot is your abort window: 'shutdown /a' cancels it.",
   "custom_commands": {

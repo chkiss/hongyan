@@ -1304,6 +1304,31 @@ m.sh = _real_sh
 
 
 # ------------------------------------------------------------- cli flags ---
+section("docker service kind")
+
+_saved_probes = dict(m.PROBES)
+_saved_sh = m.sh
+_saved_units = list(m.CFG["allowed_units"])
+m.PROBES["db"] = ("docker", "db-container")
+m.CFG["allowed_units"] = ["db"]
+
+
+def fake_docker_sh(cmd, timeout=25):
+    if "inspect" in cmd:
+        return "running"
+    return "db-container"
+
+
+m.sh = fake_docker_sh
+check("docker state reported", m.unit_state("db"), "db: running")
+check("docker restart uses the container name",
+      m.t2_restart("db").startswith("restarted db"), True)
+m.PROBES.clear()
+m.PROBES.update(_saved_probes)
+m.sh = _saved_sh
+m.CFG["allowed_units"] = _saved_units
+
+
 section("unknown cli flag dies")
 
 listener_py = os.path.join(ROOT, "hongyan_listener.py")

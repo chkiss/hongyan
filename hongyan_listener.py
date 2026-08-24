@@ -591,6 +591,11 @@ def unit_state(name):
         state = sh("powershell -NoProfile -Command \"(Get-Service -Name '%s' -ErrorAction SilentlyContinue).Status\"" % target, 20)
         return "%s: %s" % (name, state.strip() or "not installed")
 
+    if kind == "docker":
+        state = sh("docker inspect -f '{{.State.Status}}' %s 2>/dev/null" % target, 20)
+        state = state.strip() or "not found"
+        return "%s: %s" % (name, state)
+
     # NB: `systemctl is-active` exits non-zero for anything not active, so a
     # `|| echo unknown` fallback would append a second line to a real answer.
     flag = "--user " if kind == "user" else ""
@@ -1217,10 +1222,16 @@ def t2_restart(arg):
     # Linux: only user units are restartable — system units need root, and
     # `ch` sudo requires a password, so offering nginx here would just fail
     # confusingly. Windows runs the listener elevated, so any service goes.
+    # Docker restarts need the listener to hold docker rights (elevated on
+    # Windows, docker group on Linux). The command always uses the resolved
+    # target — the typed name is a config key, not the real service name.
     if unit not in CFG["allowed_units"]:
         return "refused: '%s' is not restartable. allowed: %s" % (unit, ", ".join(CFG["allowed_units"]))
-    if IS_WINDOWS:
-        sh("powershell -NoProfile -Command \"Restart-Service -Name '%s' -Force\"" % unit, 90)
+    kind, target = PROBES.get(unit, ("system", unit))
+    if kind == "docker":
+        sh("docker restart %s" % target, 120)
+    elif IS_WINDOWS:
+        sh("powershell -NoProfile -Command \"Restart-Service -Name '%s' -Force\"" % target, 90)
     else:
         sh("systemctl --user restart %s" % unit, 40)
     time.sleep(2)
