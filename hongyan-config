@@ -2,8 +2,12 @@
 """hongyan-config — toggle what the hongyan bot may see and touch.
 
 Single-file, stdlib only. Run with no arguments for the interactive menu;
-subcommands for scripting. Every change is written straight into config.json
-(notes preserved) and takes effect when the listener next restarts.
+subcommands for scripting.
+
+The menu keeps one stable list: everything the bot knows about — configured
+services, plus everything a scan has ever found (remembered in config as
+_known_services, which the listener ignores). Toggles flip [x]/[ ] without
+removing rows; 's' writes; 'q' or Ctrl-C discards unsaved changes.
 """
 import json
 import os
@@ -31,24 +35,10 @@ def save(cfg):
     with open(tmp, "w") as fh:
         json.dump(cfg, fh, indent=2, ensure_ascii=False)
     os.replace(tmp, CONFIG_PATH)
-    print("saved %s — restart the listener to apply" % CONFIG_PATH)
-
-
-def rows(cfg):
-    """(key, kind, target, allowed) for everything configured or detected."""
-    out = []
-    for key, spec in (cfg.get("services") or {}).items():
-        if isinstance(spec, dict):
-            kind = spec.get("type", "system")
-            target = spec.get("port") if kind == "port" else spec.get("unit")
-            out.append([key, kind, target or key, key in (cfg.get("allowed_units") or [])])
-        else:
-            out.append([key, spec[0], spec[1], key in (cfg.get("allowed_units") or [])])
-    return out
 
 
 def detect():
-    """Running services worth offering. Same noise filter as the listener."""
+    """Running services on this machine, noise-filtered."""
     out = []
     if IS_WINDOWS:
         cmd = ("powershell -NoProfile -Command \"Get-Service | Where-Object "
@@ -86,24 +76,49 @@ def detect():
     return out[:20]
 
 
-def enable(cfg, key, kind, target):
-    cfg.setdefault("services", {})[key] = {"type": kind, "unit": target}
-    units = cfg.setdefault("allowed_units", [])
-    if key not in units:
-        units.append(key)
+def known_map(cfg):
+    """key -> [kind, target] for everything the bot has ever been shown.
+
+    Configured services come first (they are the truth), then the _known
+    catalog remembered from past scans — the listener ignores underscore
+    keys, so this is TUI memory, not bot behaviour.
+    """
+    known = {}
+    for key, spec in (cfg.get("_known_services") or {}).items():
+        known[key] = [spec.get("type", "system"), spec.get("unit") or key]
+    for key, spec in (cfg.get("services") or {}).items():
+        if isinstance(spec, dict):
+            kind = spec.get("type", "system")
+            target = spec.get("port") if kind == "port" else spec.get("unit")
+            known[key] = [kind, target or key]
+        else:
+            known[key] = [spec[0], spec[1]]
+    return known
+
+
+def enabled_set(cfg):
+    return set(cfg.get("allowed_units") or []) & set(cfg.get("services") or {})
+
+
+def apply_state(cfg, known, enabled):
+    """Write services + allowed_units from the toggle state, keep _known."""
+    cfg["services"] = {k: {"type": known[k][0], "unit": known[k][1]}
+                       for k in sorted(enabled) if k in known}
+    cfg["allowed_units"] = sorted(enabled)
+    cfg["_known_services"] = {k: {"type": v[0], "unit": v[1]}
+                              for k, v in sorted(known.items())}
     cfg["onboarding_done"] = True
 
 
-def disable(cfg, key):
-    (cfg.get("services") or {}).pop(key, None)
-    units = cfg.setdefault("allowed_units", [])
-    if key in units:
-        units.remove(key)
-    cfg["onboarding_done"] = True
-
-
-def mark_done(cfg):
-    cfg["onboarding_done"] = True
+def sync_from_config(cfg, known):
+    """Configured services win over remembered-but-disabled catalog entries."""
+    for key, spec in (cfg.get("services") or {}).items():
+        if isinstance(spec, dict):
+            kind = spec.get("type", "system")
+            target = spec.get("port") if kind == "port" else spec.get("unit")
+            known[key] = [kind, target or key]
+        else:
+            known[key] = [spec[0], spec[1]]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -113,9 +128,13 @@ def cli(argv):
         return 0
     if argv[:1] == ["list"]:
         cfg = load()
+        known = known_map(cfg)
+        enabled = enabled_set(cfg)
         print("config: %s" % CONFIG_PATH)
-        for key, kind, target, allowed in rows(cfg):
-            print("  [%s] %-22s %-8s %s" % ("x" if allowed else " ", key, kind, target))
+        for key in sorted(known):
+            kind, target = known[key]
+            print("  [%s] %-22s %-8s %s"
+                  % ("x" if key in enabled else " ", key, kind, target))
         return 0
     if argv[:1] == ["detect"]:
         for key, kind, target in detect():
@@ -125,15 +144,19 @@ def cli(argv):
         if len(argv) < 2:
             print("usage: hongyan-config enable NAME [KIND] [TARGET]"); return 2
         cfg = load()
-        enable(cfg, argv[1], argv[2] if len(argv) > 2 else "system",
-               argv[3] if len(argv) > 3 else argv[1])
+        known = known_map(cfg)
+        key = argv[1]
+        known[key] = [argv[2] if len(argv) > 2 else known.get(key, ["system"])[0],
+                      argv[3] if len(argv) > 3 else known.get(key, ["", key])[1]]
+        apply_state(cfg, known, enabled_set(cfg) | {key})
         save(cfg)
         return 0
     if argv[:1] == ["disable"]:
         if len(argv) < 2:
             print("usage: hongyan-config disable NAME"); return 2
         cfg = load()
-        disable(cfg, argv[1])
+        known = known_map(cfg)
+        apply_state(cfg, known, enabled_set(cfg) - {argv[1]})
         save(cfg)
         return 0
     print("usage: hongyan-config [list|detect|enable NAME [KIND] [TARGET]|"
@@ -144,41 +167,81 @@ def cli(argv):
 # ── TUI ──────────────────────────────────────────────────────────────────────
 def tui():
     cfg = load()
-    detected = []
-    while True:
+    known = known_map(cfg)
+    sync_from_config(cfg, known)
+    enabled = enabled_set(cfg)
+    dirty = False
+
+    def draw():
         os.system("cls" if IS_WINDOWS else "clear")
-        print(_c("1", "hongyan — what may the bot see and touch?"))
+        star = _c("33", " *unsaved*") if dirty else ""
+        print(_c("1", "hongyan — what may the bot see and touch?") + star)
         print(_c("3", "config: %s" % CONFIG_PATH))
         print()
-        table = rows(cfg)
-        for i, (key, kind, target, allowed) in enumerate(table, 1):
-            mark = _c("32", "[x]") if allowed else _c("90", "[ ]")
-            print("  %2d %s %-22s %-8s %s" % (i, mark, key, kind, target))
+        for i, key in enumerate(sorted(known), 1):
+            kind, target = known[key]
+            if key in enabled:
+                mark, key_s = _c("32", "[x]"), key
+            else:
+                mark, key_s = _c("90", "[ ]"), _c("90", key)
+            print("  %2d %s %-22s %-8s %s" % (i, mark, key_s, kind, target))
         print()
-        print("  <number> toggle    a add detected (%d found)    "
-              "n add by hand    q quit" % len(detected))
-        choice = input("> ").strip().lower()
-        if choice == "q":
-            print("saved changes apply on listener restart"); return
-        if choice == "a":
-            detected = detect()
-            for key, kind, target in detected:
-                enable(cfg, key, kind, target)
+        print("  <number> toggle   a scan now (adds new finds, enabled)   "
+              "n add by hand")
+        print("  s save   q quit without saving")
+
+    while True:
+        draw()
+        try:
+            choice = input("> ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            choice = "q"
+        if choice in ("q", "^c"):
+            if dirty and not _confirm_discard():
+                continue
+            print("bye — unsaved changes discarded" if dirty else "bye")
+            return
+        if choice == "s":
+            apply_state(cfg, known, enabled)
             save(cfg)
+            dirty = False
+            continue
+        if choice == "a":
+            fresh = 0
+            for key, kind, target in detect():
+                if key not in known:
+                    known[key] = [kind, target]
+                    enabled.add(key)
+                    fresh += 1
+            if fresh:
+                dirty = True
+                print(_c("32", "  %d new service(s) added and enabled" % fresh))
+            else:
+                print("  nothing new running")
+            input("  enter to continue ")
             continue
         if choice == "n":
-            parts = input("name kind target: ").split()
+            parts = input("  name kind target: ").split()
             if len(parts) == 3:
-                enable(cfg, parts[0], parts[1], parts[2])
-                save(cfg)
+                known[parts[0]] = [parts[1], parts[2]]
+                enabled.add(parts[0])
+                dirty = True
             continue
-        if choice.isdigit() and 1 <= int(choice) <= len(table):
-            key, kind, target, allowed = table[int(choice) - 1]
-            if allowed:
-                disable(cfg, key)
+        if choice.isdigit() and 1 <= int(choice) <= len(known):
+            key = sorted(known)[int(choice) - 1]
+            if key in enabled:
+                enabled.discard(key)
             else:
-                enable(cfg, key, kind, target)
-            save(cfg)
+                enabled.add(key)
+            dirty = True
+
+
+def _confirm_discard():
+    try:
+        reply = input("  unsaved changes — discard? [y/N] ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        return True
+    return reply.startswith("y")
 
 
 if __name__ == "__main__":
