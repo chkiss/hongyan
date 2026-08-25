@@ -1818,9 +1818,8 @@ def describe_image(text, attachments):
         if desc is None:
             describe_image.last_was_exhausted = True
             msg = ("the vision chain could not describe that image (%s) — "
-                   "I can still answer from your message alone. I'll describe "
-                   "it with my next reply once the image models recover."
-                   % " -> ".join(vision))
+                   "it's stashed, and the next message you send me retries it "
+                   "automatically." % " -> ".join(vision))
             bench = bench_report()
             if bench:
                 msg += "\n" + "\n".join("  " + b for b in bench)
@@ -4070,7 +4069,8 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
                     audit("answered", clip(text))
                     return ans
                 audit("queued", clip(text))
-                return queue_note(text)
+                return ("I drew a blank on that one — it's queued, and I'll "
+                        "raise it next time we talk.")
 
     # Documents before images: PDFs and text files are read locally (no
     # model needed for extraction) and handed to the answer as context.
@@ -4132,7 +4132,14 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
             audit_fail("vision", "n=%d | %s" % (len(attachments), err[:90]))
             if describe_image.last_was_exhausted:
                 stash_deferred_images(attachments, text)
-            return err
+            if not doc_context:
+                return err
+            # Documents were read: the reply continues from them. A lab report
+            # as a PDF must not die because the image chain is down — the
+            # vision problem rides along in the answer instead.
+            image_desc = ""
+            if err.strip():
+                image_desc = "(note: %s)" % err.strip()
         audit("vision_ok", "n=%d chars=%d" % (len(attachments), len(image_desc)))
         if not text.strip():
             # A bare photo with no caption: the description IS the answer.
