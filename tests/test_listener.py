@@ -973,7 +973,8 @@ m.model_call = lambda *a, **k: None  # every channel down
 desc, err = m.describe_image("what is this?", att)
 check("exhaustion is flagged as deferrable",
       m.describe_image.last_was_exhausted, True)
-check("the reply promises the follow-up", "next reply" in err, True)
+check("the reply promises the automatic retry",
+      "retries it automatically" in err, True)
 
 m.stash_deferred_images(att, "what is this?")
 check("attachment stashed with its caption",
@@ -1452,9 +1453,12 @@ check("requests skips available", "Arrived" not in out, True)
 check("no open requests reads clean",
       m.fmt_requests([]), "No open requests — everything requested has arrived.")
 
-sonarr = [{"airDateUtc": "2026-08-24T00:00:00Z", "series": {"title": "Fargo"},
+from datetime import datetime as _dt, timedelta as _td
+_tomorrow = (_dt.now() + _td(days=1)).strftime("%Y-%m-%dT00:00:00Z")
+_in_three = (_dt.now() + _td(days=3)).strftime("%Y-%m-%dT00:00:00Z")
+sonarr = [{"airDateUtc": _tomorrow, "series": {"title": "Fargo"},
            "seasonNumber": 5, "episodeNumber": 3, "title": "The Paradox"}]
-radarr = [{"title": "Some Movie", "digitalRelease": "2026-08-26T00:00:00Z"}]
+radarr = [{"title": "Some Movie", "digitalRelease": _in_three}]
 out = m.fmt_calendar(sonarr, radarr)
 check("calendar lists today's episode", "Fargo S05E03" in out, True)
 check("calendar lists movie release", "Some Movie" in out, True)
