@@ -764,6 +764,35 @@ def cmd_queue():
     return format_queue(pending, "%d item(s) open:" % len(pending))
 
 
+def parse_positions(arg, count):
+    """'2', '2-4', '1, 2, 4', '1-2 5' -> sorted unique positions, or (None, why).
+
+    Written after a real miss: 'done 1, 2, 4' was refused outright because only
+    a bare number or a single range parsed, so the owner retyped it three ways
+    and cleared the wrong row on the third try. A list is the natural thing to
+    send when the digest just printed a numbered list, so it has to work.
+    """
+    tokens = [t for t in re.split(r"[,\s]+", arg.strip()) if t]
+    if not tokens:
+        return None, "which one? 'done 2', 'done 2-4', 'done 1,2,4', or 'done all'."
+    positions = []
+    for tok in tokens:
+        m = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", tok)
+        if not m:
+            return None, ("which one? '%s' isn't an item number — try 'done 2', "
+                          "'done 2-4', 'done 1,2,4', or 'done all'."
+                          % clip(tok, 20))
+        lo = int(m.group(1))
+        hi = int(m.group(2)) if m.group(2) else lo
+        lo, hi = sorted((lo, hi))
+        if hi > count or lo < 1:
+            return None, ("no open item %d — there %s %d."
+                          % (hi if hi > count else lo,
+                             "is" if count == 1 else "are", count))
+        positions.extend(range(lo, hi + 1))
+    return sorted(set(positions)), ""
+
+
 def t2_done(arg):
     """Mark queued items done. Reversible-ish and owner-only, so T2."""
     arg = (arg or "").strip().lower()
@@ -779,27 +808,30 @@ def t2_done(arg):
         audit("queue_done", "all (%d)" % len(open_idx))
         return "cleared %d item(s)." % len(open_idx)
 
-    if not arg.isdigit():
-        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", arg)
-        if not m:
-            return "which one? 'done 2', 'done 2-4', or 'done all'."
-        lo, hi = sorted((int(m.group(1)), int(m.group(2))))
-        if hi > len(open_idx):
-            return "no open item %d — there are %d." % (hi, len(open_idx))
-        cleared = []
-        for pos in range(lo, hi + 1):
-            cleared.append(items[open_idx[pos - 1]]["text"][:60])
-            items[open_idx[pos - 1]]["done"] = True
-        save_queue(items)
-        audit("queue_done", "%d-%d (%d)" % (lo, hi, len(cleared)))
-        return "cleared %d: %s" % (len(cleared), "; ".join(cleared))
-    pos = int(arg)
-    if not 1 <= pos <= len(open_idx):
-        return "no open item %d — there are %d." % (pos, len(open_idx))
-    items[open_idx[pos - 1]]["done"] = True
+    positions, why = parse_positions(arg, len(open_idx))
+    if positions is None:
+        return why
+
+    # Every position is resolved against the list as it was BEFORE anything is
+    # marked. Clearing one item renumbers the rest, so resolving them one at a
+    # time would make 'done 1,2' clear item 1 and then whatever slid into 2.
+    targets = [open_idx[p - 1] for p in positions]
+    cleared = [clip(items[n].get("text", ""), 60) for n in targets]
+    for n in targets:
+        items[n]["done"] = True
     save_queue(items)
-    audit("queue_done", clip(items[open_idx[pos - 1]]["text"], 80))
-    return "cleared: %s" % items[open_idx[pos - 1]]["text"][:80]
+    audit("queue_done", "%s (%d)" % (",".join(str(p) for p in positions),
+                                     len(targets)))
+
+    reply = "cleared %d: %s" % (len(cleared), "; ".join(cleared))
+    # Renumbering is the other half of that bug: the numbers the owner is
+    # reading came from a list that no longer exists. Reprint it.
+    left = pending_items()
+    if left:
+        reply += "\n\n" + format_queue(left, "still open:")
+    else:
+        reply += "\n\nqueue empty."
+    return reply
 
 
 def queue_digest():
@@ -1561,8 +1593,38 @@ def t2_use(arg):
     return "restored %s — %s" % (model, verdict)
 
 
+def t2_swap(arg):
+    """Put a different model in a configured slot. Owner-only, so T2.
+
+    'swap <old> <new>'. The reverse is 'swap <new> <old>', which is why this
+    needs no undo of its own — every swap is symmetric and config.json keeps a
+    timestamped backup either way.
+    """
+    parts = (arg or "").split()
+    if len(parts) != 2:
+        return ("usage: swap <old-model> <new-model> — 'models' shows what is "
+                "configured.")
+    old, new = parts
+    if not roles_of(old) and CFG.get("model_vision") != old:
+        return "refused: '%s' is not in any chain." % old
+    if old == new:
+        return "%s is already there." % new
+    catalog = model_catalog()
+    if catalog is not None and new not in catalog:
+        return ("refused: the endpoint does not offer '%s' right now." % new)
+    changed = swap_chain_model(old, new)
+    if not changed:
+        return "nothing to change — %s is not configured anywhere." % old
+    probe, err = _request_once(new, [{"role": "user",
+                                      "content": "Reply with exactly: OK"}])
+    verdict = "answers fine" if probe else ("but it failed a test call: %s"
+                                            % clip(err, 80))
+    return "swapped %s -> %s in %s — %s" % (old, new, ", ".join(changed), verdict)
+
+
 T2 = {
     "restart": t2_restart,
+    "swap": t2_swap,
     "rerun": t2_rerun,
     "note": t2_note,
     "mute": t2_mute,
@@ -2246,8 +2308,14 @@ def _triage_failures(failures):
             # A model that no longer exists waits for a human decision —
             # benching it "until you look" must not quietly un-disable itself.
             bench_model(model, err, seconds=None)
-            note_model_gone(model, err)
             raise_action_item(model, err)
+            # The bench is indefinite, so without this the dead model stays at
+            # the head of its chain until someone edits config.json by hand —
+            # x-preview-f-free sat there for five days. The repair rides along
+            # in the same alert: one event, one message.
+            was = configured_models().get(model) or ""
+            repair, repaired = safe_heal(model, err)
+            note_model_gone(model, err, extra=repair, force=repaired, roles=was)
             continue
         seconds = bench_seconds_for(err, kind)
         state = _load_model_state()
@@ -2295,7 +2363,7 @@ _MODEL_GONE_RE = re.compile(
     r"free usage exceeded|add credits|decommission|deprecat", re.I)
 
 
-def note_model_gone(model, exc):
+def note_model_gone(model, exc, extra="", force=False, roles=""):
     """Report a model that has stopped existing, from a call that really failed.
 
     This replaces polling the provider. A scheduled availability check would be
@@ -2305,7 +2373,14 @@ def note_model_gone(model, exc):
     a message; nothing runs against the provider on a timer.
 
     Alerts once a day per model. A withdrawn model fails on every subsequent
-    call, and repeating the warning would turn a useful message into noise.
+    call, and repeating the warning would turn a useful message into noise —
+    except when `force` says the chain was actually rewritten, which is a fact
+    about the owner's config and has to reach them the once.
+
+    `extra` carries what the repair did or offers; it rides in this message
+    rather than a second one, so a dead model is still one event, one page.
+    `roles` is passed in because the repair may already have taken the model
+    out of the chains by the time this runs.
     """
     text = str(exc)
     if not _MODEL_GONE_RE.search(text):
@@ -2314,7 +2389,7 @@ def note_model_gone(model, exc):
         seen = json.load(open(MODEL_GONE_FILE))
     except (OSError, ValueError):
         seen = {}
-    if time.time() - seen.get(model, 0) < 86400:
+    if time.time() - seen.get(model, 0) < 86400 and not force:
         return
     seen[model] = time.time()
     try:
@@ -2324,7 +2399,7 @@ def note_model_gone(model, exc):
         pass
 
     audit_fail("model_gone", "%s | %s" % (model, clip(text, 100)))
-    roles = configured_models().get(model) or "a"
+    roles = roles or configured_models().get(model) or "a"
     try:
         subprocess.run(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -2332,11 +2407,195 @@ def note_model_gone(model, exc):
              "The %s model (%s) is failing and looks gone or capped: %s\n"
              "It is benched until you look at it — the fallback took over for now. "
              "This is also waiting in your queue as an action item.\n\n"
-             "Put it back with 'use %s', or pick another in config.json."
-             % (roles[0], model, clip(text, 120), model)],
+             "Put it back with 'use %s', or pick another in config.json.%s"
+             % (roles[0], model, clip(text, 120), model,
+                ("\n\n" + extra) if extra else "")],
             timeout=60, capture_output=True)
     except Exception as exc2:  # noqa: BLE001
         audit_fail("model_gone_alert", str(exc2)[:100])
+
+
+def save_config():
+    """Persist CFG atomically, keeping one timestamped backup beside it."""
+    try:
+        with open(CONFIG_PATH) as src:
+            prior = src.read()
+        with open(CONFIG_PATH + time.strftime(".bak-%Y-%m-%d-%H%M%S"), "w") as dst:
+            dst.write(prior)
+    except OSError:
+        pass  # a missing or unreadable prior config must not block the write
+    tmp = CONFIG_PATH + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(CFG, fh, indent=2)
+    os.replace(tmp, CONFIG_PATH)
+
+
+def roles_of(model):
+    """Which chains this model serves right now."""
+    return [role for role, chain in ROLE_CHAINS.items() if model in chain]
+
+
+def substitute_candidates(role, exclude=()):
+    """Ranked replacements for a role, from the roster's capability metadata.
+
+    A NAME MATCH IS NOT A CAPABILITY MATCH — the catalogue once offered a 1.6T
+    coding model whose name read like a general one, and it would have been a
+    terrible answerer. So candidates come from the roster, which carries the
+    vision flag, the input modalities and the context length, and anything the
+    roster does not describe is skipped rather than guessed at.
+
+    Called only from the error path of a call some message caused, which keeps
+    the standing property that nothing here talks to the provider on a timer.
+    """
+    roster = fetch_roster()
+    if not roster:
+        return []
+    catalog = model_catalog()
+    configured = set(configured_models())
+    out = []
+    for mid, meta in roster.items():
+        if mid in exclude or mid in configured:
+            continue
+        if catalog is not None and mid not in catalog:
+            continue
+        if not _usable(mid):
+            continue
+        if role == "vision" and not meta.get("vision"):
+            continue
+        out.append((mid, meta))
+    out.sort(key=lambda pair: pair[1].get("context") or 0, reverse=True)
+    return out
+
+
+def swap_chain_model(old, new):
+    """Put `new` wherever `old` sits in the configured chains. Returns keys hit."""
+    changed = []
+    for key in ("text_chain", "vision_chain"):
+        chain = [m for m in (CFG.get(key) or []) if m]
+        if old in chain:
+            CFG[key] = [new if m == old else m for m in chain]
+            changed.append(key)
+    for key in ("model_answer", "model_classify", "model_vision"):
+        if CFG.get(key) == old:
+            CFG[key] = new
+            changed.append(key)
+    if not changed:
+        return []
+    save_config()
+    ROLE_CHAINS.clear()
+    ROLE_CHAINS.update(_build_chains())
+    audit("model_swap", "%s -> %s (%s)" % (old, new, ",".join(changed)))
+    return changed
+
+
+def drop_chain_model(old):
+    """Remove a model from every chain, provided something is left behind it.
+
+    A model benched "until a human clears it" is skipped on every call, so
+    leaving it configured costs nothing at runtime — but it does keep a dead
+    name at the head of the list the owner reads, which is how one sat there
+    for five days looking like the model in use.
+    """
+    changed = []
+    for key in ("text_chain", "vision_chain"):
+        chain = [m for m in (CFG.get(key) or []) if m]
+        if old in chain and len(chain) > 1:
+            CFG[key] = [m for m in chain if m != old]
+            changed.append(key)
+    for key in ("model_answer", "model_classify", "model_vision"):
+        if CFG.get(key) == old:
+            role = "vision" if key == "model_vision" else "answering"
+            rest = [m for m in chain_for(role) if m != old]
+            if rest:
+                CFG[key] = rest[0]
+                changed.append(key)
+    if not changed:
+        return []
+    save_config()
+    ROLE_CHAINS.clear()
+    ROLE_CHAINS.update(_build_chains())
+    audit("model_dropped", "%s (%s)" % (old, ",".join(changed)))
+    return changed
+
+
+def _describe_candidate(mid, meta):
+    bits = []
+    if meta.get("context"):
+        bits.append("%dk ctx" % (int(meta["context"]) / 1000))
+    if meta.get("vision"):
+        bits.append("vision")
+    return "%s%s" % (mid, " (%s)" % ", ".join(bits) if bits else "")
+
+
+def heal_gone_model(model, err):
+    """A model has left for good — keep the roles it served working.
+
+    A withdrawn model used to be benched, announced, and then left sitting at
+    the head of its chain until a human edited config.json. That is the wrong
+    default twice over: every later call still paid its failure first, and the
+    vision chain in particular was one model deep, so "benched until you look"
+    read to the owner as "vision is broken".
+
+    Two situations, and only one of them is ours to decide:
+
+      * the role still has a usable model behind the dead one — nothing is
+        broken this minute, so this only OFFERS a shortlist. Picking a
+        replacement is a judgement about model quality, and a bad automatic
+        pick is worse than a slightly shorter chain.
+      * the role has nothing usable left — hongyan cannot do that job at all,
+        so the best-ranked candidate goes in automatically. Anything is better
+        than dead, and the message says what changed and how to reverse it.
+
+    Returns (text, changed): what to tell the owner, and whether config.json
+    was actually rewritten.
+    """
+    roles = roles_of(model) or ["answering"]
+    lines, applied, changed = [], [], False
+    for role in roles:
+        alive = [m for m in chain_for(role) if m != model and _usable(m)]
+        ranked = substitute_candidates(role, exclude=(model,))
+        if not ranked:
+            if alive:
+                if drop_chain_model(model):
+                    changed = True
+                    lines.append("dropped it from the %s chain — %s is "
+                                 "answering." % (role, alive[0]))
+            else:
+                lines.append("%s has no working model left and the roster "
+                             "offers no replacement I can verify." % role)
+            continue
+        best, meta = ranked[0]
+        if alive and drop_chain_model(model):
+            # It is gone for good, so it comes out of the chain now; only the
+            # choice of a NEW model waits for a person.
+            changed = True
+            lines.append("dropped it from the %s chain — %s is answering."
+                         % (role, alive[0]))
+        if alive:
+            shortlist = ", ".join(_describe_candidate(m, d)
+                                  for m, d in ranked[:3])
+            lines.append("%s still works via %s. Candidates to replace %s: %s\n"
+                         "Reply 'swap %s <model>' to pick one."
+                         % (role, alive[0], model, shortlist, model))
+        elif swap_chain_model(model, best):
+            applied.append(best)
+            changed = True
+            lines.append("%s had nothing left, so I put %s in its place (%s). "
+                         "Reverse it with 'swap %s %s'."
+                         % (role, best, _describe_candidate(best, meta),
+                            best, model))
+    if applied:
+        audit("model_healed", "%s -> %s" % (model, ",".join(applied)))
+    return "\n\n".join(lines), changed
+
+
+def safe_heal(model, err):
+    """heal_gone_model, but a failure in the repair never breaks the call path."""
+    try:
+        return heal_gone_model(model, err)
+    except Exception as exc:  # noqa: BLE001
+        audit_fail("model_heal", str(exc)[:120])
+        return "", False
 
 
 def model_catalog():
@@ -3271,7 +3530,50 @@ def web_search(query, limit=5):
 
 _DNS_VERDICT_TTL_POLICY = 60     # a policy verdict is stable; trust it a minute
 _DNS_VERDICT_TTL_FAILURE = 15    # resolver blips recover; re-ask soon
+_DNS_VERDICT_TTL_NXDOMAIN = 86400  # "no such host" is a fact, not a blip
 _dns_verdicts = {}
+_nxdomain_hosts = set()
+NXDOMAIN_FILE = os.path.join(STATE_DIR, "nxdomain.json")
+
+
+def _load_nxdomain():
+    """Hosts that do not exist, remembered across restarts.
+
+    text.bitwarden.com and lite.<whatever> are never going to resolve, but the
+    in-memory cache died with every restart, so the same handful of invented
+    hostnames were re-resolved and re-logged for days.
+    """
+    try:
+        with open(NXDOMAIN_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return
+    now = time.time()
+    for host, at in data.items():
+        if now - at < _DNS_VERDICT_TTL_NXDOMAIN:
+            _dns_verdicts[host] = (False, at, "dns")
+            _nxdomain_hosts.add(host)
+
+
+def _remember_nxdomain(host, at):
+    try:
+        with open(NXDOMAIN_FILE) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        data = {}
+    data[host] = at
+    cutoff = at - _DNS_VERDICT_TTL_NXDOMAIN
+    data = {h: t for h, t in data.items() if t > cutoff}
+    try:
+        tmp = NXDOMAIN_FILE + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(data, fh)
+        os.replace(tmp, NXDOMAIN_FILE)
+    except OSError:
+        pass
+
+
+_load_nxdomain()
 
 
 def host_check(url):
@@ -3281,7 +3583,8 @@ def host_check(url):
     site because the resolver hiccuped once sent the model chasing five
     variants of a reachable missouri.edu page and littering the audit log
     with FAIL:fetch_blocked. Both verdicts are cached briefly so probing
-    lite./text./m. variants does not mean four fresh lookups apiece.
+    lite./text./m. variants does not mean four fresh lookups apiece —
+    and a host that does not exist at all is remembered for a day.
     """
     host = urllib.parse.urlsplit(url).hostname
     if not host:
@@ -3290,13 +3593,23 @@ def host_check(url):
     cached = _dns_verdicts.get(host)
     if cached:
         verdict, at, _why = cached
-        ttl = _DNS_VERDICT_TTL_POLICY if verdict else _DNS_VERDICT_TTL_FAILURE
+        if verdict:
+            ttl = _DNS_VERDICT_TTL_POLICY
+        elif _why == "dns":
+            ttl = (_DNS_VERDICT_TTL_NXDOMAIN if host in _nxdomain_hosts
+                   else _DNS_VERDICT_TTL_FAILURE)
+        else:
+            ttl = _DNS_VERDICT_TTL_POLICY
         if now - at < ttl:
             return verdict, _why
     try:
         infos = socket.getaddrinfo(host, None)
-    except OSError:
+    except OSError as exc:
         _dns_verdicts[host] = (False, now, "dns")
+        if isinstance(exc, socket.gaierror) and \
+                exc.errno in (socket.EAI_NONAME, socket.EAI_NODATA):
+            _nxdomain_hosts.add(host)
+            _remember_nxdomain(host, now)
         return False, "dns"
     for info in infos:
         try:
@@ -3338,7 +3651,13 @@ class _SafeRedirects(urllib.request.HTTPRedirectHandler):
 _FETCH_OPENER = urllib.request.build_opener(_SafeRedirects())
 
 
-def fetch_text(url, limit=1500):
+def fetch_text(url, limit=1500, probe=False):
+    """probe=True marks a hostname this code INVENTED (lite./text./m. variants).
+
+    Such a name failing to resolve is the expected answer, not a failure worth
+    a FAIL: line — most of the fetch_dns entries in the audit log were the
+    guesses, which buried the handful of real lookup failures.
+    """
     if not url.startswith(("http://", "https://")):
         return None
     allowed, why = host_check(url)
@@ -3346,7 +3665,7 @@ def fetch_text(url, limit=1500):
         fetch_text.last_refusal = why
         if why == "policy":
             audit_fail("fetch_blocked", clip(url, 120))
-        else:
+        elif not probe:
             audit_fail("fetch_dns", clip(url, 120))
         return None
     fetch_text.last_refusal = ""
@@ -3421,7 +3740,8 @@ def fetch_site(domain, limit=2000):
     results = {}
 
     def grab(cand):
-        results[cand] = fetch_text("https://" + cand + "/", limit)
+        results[cand] = fetch_text("https://" + cand + "/", limit,
+                                   probe=(cand != host))
 
     threads = [threading.Thread(target=grab, args=(c,), daemon=True) for c in candidates]
     for t in threads:
@@ -3689,6 +4009,11 @@ def _decide_retry(text, prior, image_desc, steps, challenged, allowed,
     # The retry fires on roughly one agent turn in six, and the malformed output
     # was never recorded — so the prompt could not be tuned against real
     # failures, only guessed at. Log WHAT came back, not just that it happened.
+    #
+    # "raw=" with nothing after it read as the logging being broken again. It
+    # was not: the model really did return nothing, which is a different defect
+    # from returning unparseable text and has to be legible as one.
+    raw = raw if (raw or "").strip() else "<empty completion>"
     if not allowed:
         audit_fail("decide_unparsed", "%s | gave up | raw=%s" % (why, clip(raw, 200)))
         return None, None

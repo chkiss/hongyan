@@ -633,6 +633,14 @@ if os.path.exists(m.MODEL_GONE_FILE):
     os.remove(m.MODEL_GONE_FILE)
 
 
+# The repair path reads the roster and the catalogue. This suite makes no
+# network calls, and a test that silently did would also be picking a real
+# replacement model out of live data.
+_real_roster, _real_catalog = m.fetch_roster, m.model_catalog
+m.fetch_roster = lambda: {}
+m.model_catalog = lambda: None
+
+
 def gone_then_ok(model, messages, max_tokens=None, effort=None):
     if model == "big-pickle":
         return None, "HTTP Error 404: Not Found — no such model"
@@ -642,6 +650,7 @@ def gone_then_ok(model, messages, max_tokens=None, effort=None):
 m._request_once = gone_then_ok
 out = m.model_call("routing", [{"role": "user", "content": "hi"}])
 m._request_once = _real_once
+m.fetch_roster, m.model_catalog = _real_roster, _real_catalog
 check("gone model still answered around", out, "saved by hy3")
 check("gone model benched indefinitely",
       m._load_model_state().get("big-pickle", {}).get("until"), None)
@@ -1470,6 +1479,76 @@ check("webhook grab formats", "grabbed" in m.fmt_webhook("sonarr", web)
 plex = {"event": "media.play", "Metadata": {"title": "The Bear"}}
 check("webhook plex play formats", "playback started" in m.fmt_webhook("plex", plex), True)
 check("webhook quiet on unknown", m.fmt_webhook("plex", {"event": "media.stop"}), None)
+
+
+section("clearing queue items")
+
+# 'done 1, 2, 4' was refused outright — only a bare number or one range
+# parsed — so the owner retyped it three ways and the third try cleared the
+# wrong row, because clearing an item renumbers the ones behind it.
+check("list parses", m.parse_positions("1, 2, 4", 5)[0], [1, 2, 4])
+check("range and single mix", m.parse_positions("1-2 5", 5)[0], [1, 2, 5])
+check("duplicates collapse", m.parse_positions("2,2,1", 3)[0], [1, 2])
+check("out of range refused", m.parse_positions("1,9", 3)[0], None)
+check("garbage refused", m.parse_positions("banana", 3)[0], None)
+check("empty refused", m.parse_positions("  ", 3)[0], None)
+
+with open(m.QUEUE_FILE, "w") as fh:
+    for word in ("alpha", "beta", "gamma", "delta"):
+        fh.write(json.dumps({"ts": time.time(), "text": word,
+                             "kind": "note", "done": False}) + "\n")
+reply = m.t2_done("1,3")
+still = [i["text"] for i in m.load_queue() if not i.get("done")]
+check("list clears both named items", still, ["beta", "delta"])
+check("no renumbering slip", "gamma" in reply and "beta" not in reply.split("still open")[0], True)
+check("remaining list is reprinted", "still open" in reply, True)
+
+
+section("replacing a withdrawn model")
+
+_chain_before = list(m.CFG.get("text_chain") or [])
+if _chain_before:
+    dead = _chain_before[0]
+    check("roles_of finds the chain", "answering" in m.roles_of(dead), True)
+    changed = m.swap_chain_model(dead, "stand-in-model")
+    check("swap rewrites the chain", m.CFG["text_chain"][0], "stand-in-model")
+    check("swap reports what it touched", "text_chain" in changed, True)
+    check("chains reload in place", m.chain_for("answering")[0], "stand-in-model")
+    check("swap is symmetric", m.swap_chain_model("stand-in-model", dead) and
+          m.CFG["text_chain"], _chain_before)
+    check("swapping an absent model is a no-op",
+          m.swap_chain_model("never-configured", "x"), [])
+    if len(_chain_before) > 1:
+        # A withdrawn model used to stay at the head of its chain until a
+        # human edited config.json.
+        m.drop_chain_model(dead)
+        check("a gone model leaves the chain", dead in m.CFG["text_chain"], False)
+        check("the fallback moves up", m.CFG["text_chain"][0], _chain_before[1])
+        m.CFG["text_chain"] = list(_chain_before)
+        m.save_config()
+        m.ROLE_CHAINS.clear()
+        m.ROLE_CHAINS.update(m._build_chains())
+    # Dropping the only model would leave the role with nothing at all, which
+    # is worse than a chain whose head is known-dead.
+    m.CFG["text_chain"] = ["only-model"]
+    m.save_config()
+    check("a one-model chain is never emptied",
+          (m.drop_chain_model("only-model"), m.CFG["text_chain"]),
+          ([], ["only-model"]))
+    m.CFG["text_chain"] = list(_chain_before)
+    m.save_config()
+    m.ROLE_CHAINS.clear()
+    m.ROLE_CHAINS.update(m._build_chains())
+
+# A hostname this code invented (lite./text./m.) failing to resolve is the
+# expected answer, not a failure — and it must be remembered across the
+# restart that used to throw the in-memory cache away every hour.
+m._remember_nxdomain("text.example.invalid", time.time())
+m._dns_verdicts.clear()
+m._nxdomain_hosts.clear()
+m._load_nxdomain()
+check("nxdomain survives a restart",
+      "text.example.invalid" in m._nxdomain_hosts, True)
 
 
 section("unknown cli flag dies")
