@@ -1506,6 +1506,36 @@ check("remaining list is reprinted", "still open" in reply, True)
 
 section("replacing a withdrawn model")
 
+# The endpoint spells models 'hy3-free'; the only roster with capability
+# metadata spells the same model 'tencent/hy3:free'. Comparing them literally
+# found zero overlap, which silently made every substitution impossible.
+check("stem strips vendor and free suffix", m.model_stem("tencent/hy3:free"), "hy3")
+check("stem of the endpoint id matches", m.model_stem("hy3-free"), "hy3")
+
+_saved = (m.model_catalog, m.fetch_roster)
+m.model_catalog = lambda: ["hy3-free", "ling-3.0-flash-fin-free",
+                           "muse-spark-1.2-contributor-free", "claude-opus-5"]
+m.fetch_roster = lambda: {
+    "inclusionai/ling-3.0-flash-fin:free": {"context": 262144, "vision": False},
+    "stepfun/step-3.7-flash:free": {"context": 65536, "vision": True},
+}
+cands = m.substitute_candidates("answering")
+check("candidate is named the way a call can use it",
+      cands[0][0], "ling-3.0-flash-fin-free")
+check("roster-described candidates come first", cands[0][1]["verified"], True)
+check("a roster model the endpoint does not serve is dropped",
+      any(c[0].startswith("step") for c in cands), False)
+check("undescribed free models are offered but flagged",
+      ("muse-spark-1.2-contributor-free", False) in
+      [(c[0], c[1]["verified"]) for c in cands], True)
+check("paid models are never candidates",
+      any(c[0] == "claude-opus-5" for c in cands), False)
+# Vision is where guessing is precisely the mistake, so an unverified name
+# is not an option at all.
+check("vision takes only verified vision models",
+      m.substitute_candidates("vision"), [])
+m.model_catalog, m.fetch_roster = _saved
+
 _chain_before = list(m.CFG.get("text_chain") or [])
 if _chain_before:
     dead = _chain_before[0]

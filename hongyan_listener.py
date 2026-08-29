@@ -2435,36 +2435,71 @@ def roles_of(model):
     return [role for role, chain in ROLE_CHAINS.items() if model in chain]
 
 
-def substitute_candidates(role, exclude=()):
-    """Ranked replacements for a role, from the roster's capability metadata.
+def model_stem(mid):
+    """'tencent/hy3:free' and 'hy3-free' are the same model. Reduce both to 'hy3'.
 
-    A NAME MATCH IS NOT A CAPABILITY MATCH — the catalogue once offered a 1.6T
-    coding model whose name read like a general one, and it would have been a
-    terrible answerer. So candidates come from the roster, which carries the
-    vision flag, the input modalities and the context length, and anything the
-    roster does not describe is skipped rather than guessed at.
+    The two sources disagree on spelling: the endpoint we CALL (OpenCode Zen)
+    lists short ids like 'hy3-free', while the only roster carrying capability
+    metadata (modalities, context, the vision flag) is Nous's, which spells the
+    same models 'vendor/name:free'. Comparing them literally found no overlap
+    at all, which quietly made every substitution impossible.
+    """
+    mid = (mid or "").strip().lower()
+    mid = mid.rsplit("/", 1)[-1]
+    for suffix in (":free", "-free", ":latest"):
+        if mid.endswith(suffix):
+            mid = mid[:-len(suffix)]
+    return mid
+
+
+def substitute_candidates(role, exclude=()):
+    """Ranked replacements for a role: (callable id, metadata), best first.
+
+    A NAME MATCH IS NOT A CAPABILITY MATCH — the catalogue offers a 1.6T coding
+    model whose name reads like a general one, and it would be a terrible
+    answerer. So capability comes from the roster: the vision flag, the input
+    modalities, the context length. Models the roster does not describe are
+    still listed for a TEXT role, marked unverified, because the owner can
+    judge a name the code should not — but they are never applied automatically
+    and never offered for vision, where guessing is exactly the mistake.
+
+    The ids returned are the endpoint's, because those are the ones a call can
+    actually use.
 
     Called only from the error path of a call some message caused, which keeps
     the standing property that nothing here talks to the provider on a timer.
     """
-    roster = fetch_roster()
-    if not roster:
-        return []
     catalog = model_catalog()
+    if not catalog:
+        return []
+    roster = fetch_roster() or {}
+    by_stem = {}
+    for mid in catalog:
+        by_stem.setdefault(model_stem(mid), mid)
+
     configured = set(configured_models())
-    out = []
-    for mid, meta in roster.items():
-        if mid in exclude or mid in configured:
-            continue
-        if catalog is not None and mid not in catalog:
-            continue
-        if not _usable(mid):
+    skip = set(exclude) | configured
+    verified, unverified = [], []
+    for rid, meta in roster.items():
+        mid = by_stem.get(model_stem(rid))
+        if not mid or mid in skip or not _usable(mid):
             continue
         if role == "vision" and not meta.get("vision"):
             continue
-        out.append((mid, meta))
-    out.sort(key=lambda pair: pair[1].get("context") or 0, reverse=True)
-    return out
+        verified.append((mid, dict(meta, verified=True)))
+    if role != "vision":
+        known = {mid for mid, _ in verified}
+        for mid in catalog:
+            # Free tier only: a paid model would answer beautifully and bill
+            # for it, which is not a repair the owner asked for.
+            if not mid.endswith(("-free", ":free")) or mid in skip or mid in known:
+                continue
+            if not _usable(mid):
+                continue
+            unverified.append((mid, {"verified": False}))
+    verified.sort(key=lambda pair: pair[1].get("context") or 0, reverse=True)
+    unverified.sort(key=lambda pair: pair[0])
+    return verified + unverified
 
 
 def swap_chain_model(old, new):
@@ -2524,6 +2559,8 @@ def _describe_candidate(mid, meta):
         bits.append("%dk ctx" % (int(meta["context"]) / 1000))
     if meta.get("vision"):
         bits.append("vision")
+    if not meta.get("verified"):
+        bits.append("capability unverified")
     return "%s%s" % (mid, " (%s)" % ", ".join(bits) if bits else "")
 
 
@@ -2564,7 +2601,10 @@ def heal_gone_model(model, err):
                 lines.append("%s has no working model left and the roster "
                              "offers no replacement I can verify." % role)
             continue
-        best, meta = ranked[0]
+        # Only a candidate whose capabilities are actually described gets
+        # installed without being asked about.
+        best, meta = next((c for c in ranked if c[1].get("verified")),
+                          (None, {}))
         if alive and drop_chain_model(model):
             # It is gone for good, so it comes out of the chain now; only the
             # choice of a NEW model waits for a person.
@@ -2577,6 +2617,13 @@ def heal_gone_model(model, err):
             lines.append("%s still works via %s. Candidates to replace %s: %s\n"
                          "Reply 'swap %s <model>' to pick one."
                          % (role, alive[0], model, shortlist, model))
+        elif not best:
+            shortlist = ", ".join(_describe_candidate(m, d)
+                                  for m, d in ranked[:3])
+            lines.append("%s has nothing working left, and no candidate whose "
+                         "capabilities I can verify. Untested options: %s\n"
+                         "Reply 'swap %s <model>' to try one."
+                         % (role, shortlist, model))
         elif swap_chain_model(model, best):
             applied.append(best)
             changed = True
