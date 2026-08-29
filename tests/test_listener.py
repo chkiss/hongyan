@@ -1614,6 +1614,36 @@ check("nxdomain survives a restart",
       "text.example.invalid" in m._nxdomain_hosts, True)
 
 
+section("identity stays out of the repo")
+
+# The owner's real ACI once shipped in install.sh as the "example" UUID and
+# had to be scrubbed out of history. Reading the diff carefully is not a
+# control — this is, and the auto-updater gates on this suite, so a bad
+# commit that reaches the box rolls back instead of deploying.
+_scan = importlib.util.spec_from_file_location(
+    "scanid", os.path.join(ROOT, "scripts", "scan-identity.py"))
+_ident = importlib.util.module_from_spec(_scan)
+_scan.loader.exec_module(_ident)
+
+check("no identity in any tracked file", _ident.scan(), [])
+
+# And the check itself has to be able to fail, or it is decoration.
+_probe = os.path.join(ROOT, ".identity-probe-tmp")
+try:
+    # Assembled at runtime, never written down: a literal here would be a
+    # phone number in a tracked file, which is the thing being prevented.
+    # (The scanner caught this file when the number was spelled out — the
+    # check's first real find was the test that tests it.)
+    with open(_probe, "w") as fh:
+        fh.write("owner = %s\n" % ("+1" + "336" + "555" + "0199"))
+    _files = _ident._tracked_files
+    _ident._tracked_files = lambda staged: [os.path.basename(_probe)]
+    check("a real-looking number would be caught", len(_ident.scan()), 1)
+    _ident._tracked_files = _files
+finally:
+    os.path.exists(_probe) and os.remove(_probe)
+
+
 section("unknown cli flag dies")
 
 listener_py = os.path.join(ROOT, "hongyan_listener.py")

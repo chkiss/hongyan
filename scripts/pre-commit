@@ -1,0 +1,14 @@
+#!/bin/bash
+# hongyan pre-commit: identity never leaves this machine in a commit.
+#
+# Installed by install.sh (and by scripts/install-hooks.sh for an existing
+# clone). Scans the STAGED content only — what is actually about to be
+# committed — so an unstaged scratch file with a real number in it does not
+# block unrelated work.
+#
+# The same scan runs over every tracked file in the test suite, which the
+# auto-updater gates on: if something lands anyway, the update that would
+# have deployed it rolls back instead.
+set -u
+repo="$(git rev-parse --show-toplevel)"
+exec python3 "$repo/scripts/scan-identity.py" --staged

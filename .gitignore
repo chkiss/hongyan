@@ -1,5 +1,12 @@
 # Secrets and identity — never commit.
+#
+# Every real value (ACI, both phone numbers, the API key) lives ONLY in
+# ~/.config/hongyan/config.json, outside this tree. The rules below are the
+# first line; scripts/scan-identity.py is the second, and it runs as a
+# pre-commit hook and again over every tracked file in the test suite, so
+# nobody has to read a diff to catch a leak.
 config.json
+config.json.*
 *.key
 nous.key
 

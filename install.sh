@@ -26,4 +26,10 @@ if [ ! -t 0 ] && [ -e /dev/tty ]; then
     exec < /dev/tty
 fi
 
+# Git hooks are not versioned, so a fresh clone has none — which is the state
+# in which a real ACI once reached a public commit. Install them before the
+# config exists, so the guard predates the identity it guards.
+[ -x "$REPO/scripts/install-hooks.sh" ] && \
+    bash "$REPO/scripts/install-hooks.sh" >/dev/null 2>&1
+
 exec python3 "$REPO/hongyan-config" --install
