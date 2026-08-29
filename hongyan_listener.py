@@ -1609,9 +1609,10 @@ def t2_swap(arg):
         return "refused: '%s' is not in any chain." % old
     if old == new:
         return "%s is already there." % new
-    catalog = model_catalog()
+    provider = split_model(new)[0]
+    catalog = model_catalog(provider)
     if catalog is not None and new not in catalog:
-        return ("refused: the endpoint does not offer '%s' right now." % new)
+        return ("refused: %s does not offer '%s' right now." % (provider, new))
     changed = swap_chain_model(old, new)
     if not changed:
         return "nothing to change — %s is not configured anywhere." % old
@@ -1985,13 +1986,82 @@ def deliver_deferred_images(client):
     return delivered
 
 
-def api_key():
-    """Optional. The Zen free tier works keyless today; an API key makes
-    usage attributable to an account instead of an IP address."""
+# --------------------------------------------------------------------------
+# providers
+#
+# One chain, more than one endpoint. Zen and Nous serve overlapping but not
+# identical free tiers — Nous is the only one offering a free VISION model,
+# Zen the only one offering big-pickle — and a free tier that rotates is
+# exactly the case where having two of them is worth the plumbing.
+#
+# A chain entry is "model" (the default provider) or "provider:model". The
+# split is on the FIRST colon and only when the prefix names a configured
+# provider, because Nous ids carry their own colon: "nous:tencent/hy3:free"
+# is provider "nous", model "tencent/hy3:free".
+# --------------------------------------------------------------------------
+
+DEFAULT_PROVIDERS = {
+    "zen": {
+        "api_base": "https://opencode.ai/zen/v1",
+    },
+    "nous": {
+        "api_base": "https://inference-api.nousresearch.com/v1",
+        # Nous rejects an untagged request outright ("missing user tag").
+        # The tags are attribution, not identity — nothing here names the
+        # owner, and the ACI in particular never leaves this machine.
+        "tags": ["product=hongyan", "client=hongyan-v2", "user=owner"],
+    },
+}
+
+
+def _build_providers():
+    """Merge configured providers over the built-in ones.
+
+    An install written before providers existed has api_base/key_file at the
+    top level and bare model ids in its chains; that config keeps working,
+    with the top-level endpoint as the default provider.
+    """
+    out = {name: dict(conf) for name, conf in DEFAULT_PROVIDERS.items()}
+    for name, conf in (CFG.get("providers") or {}).items():
+        out.setdefault(name, {}).update(conf or {})
+    default = CFG.get("default_provider")
+    if not default:
+        base = CFG.get("api_base")
+        default = next((n for n, c in out.items() if c.get("api_base") == base),
+                       None)
+        if not default and base:
+            out["default"] = {"api_base": base}
+            default = "default"
+    for conf in out.values():
+        conf.setdefault("key_file", CFG.get("key_file", ""))
+    return out, (default or "zen")
+
+
+PROVIDERS, DEFAULT_PROVIDER = _build_providers()
+
+
+def split_model(entry):
+    """'nous:tencent/hy3:free' -> ('nous', 'tencent/hy3:free')."""
+    name, sep, rest = (entry or "").partition(":")
+    if sep and name in PROVIDERS and rest:
+        return name, rest
+    return DEFAULT_PROVIDER, entry
+
+
+def provider_conf(name):
+    return PROVIDERS.get(name) or PROVIDERS.get(DEFAULT_PROVIDER) or {}
+
+
+def api_key(provider=None):
+    """Optional per provider. The Zen free tier works keyless today; an API
+    key makes usage attributable to an account instead of an IP address.
+    Nous requires one."""
+    conf = provider_conf(provider or DEFAULT_PROVIDER)
+    path = conf.get("key_file") or CFG.get("key_file") or ""
     try:
-        with open(CFG["key_file"]) as fh:
+        with open(os.path.expanduser(path)) as fh:
             return fh.read().strip()
-    except (OSError, KeyError):
+    except (OSError, TypeError):
         return ""
 
 
@@ -2154,11 +2224,15 @@ def _request_once(model, messages, max_tokens=None, effort=None):
     Zen endpoint — honoured per-variant, and harmless where a model ignores
     it: the knob changes how long the model thinks, never whether it may.
     """
-    payload = {"model": model, "messages": messages, "temperature": 0}
+    provider, mid = split_model(model)
+    conf = provider_conf(provider)
+    payload = {"model": mid, "messages": messages, "temperature": 0}
     if max_tokens:
         payload["max_tokens"] = max_tokens
     if effort:
         payload["reasoning_effort"] = effort
+    if conf.get("tags"):
+        payload["tags"] = list(conf["tags"])
     body = json.dumps(payload).encode()
     headers = {
         "Content-Type": "application/json",
@@ -2166,11 +2240,11 @@ def _request_once(model, messages, max_tokens=None, effort=None):
         "User-Agent": "hongyan/2.0",
         "Accept": "application/json",
     }
-    key = api_key()
+    key = api_key(provider)
     if key:
         headers["Authorization"] = "Bearer " + key
     req = urllib.request.Request(
-        CFG["api_base"] + "/chat/completions",
+        conf.get("api_base", CFG.get("api_base", "")) + "/chat/completions",
         data=body,
         headers=headers,
     )
@@ -2195,8 +2269,18 @@ def _request_once(model, messages, max_tokens=None, effort=None):
         return None, "unexpected response shape"
     # Reasoning models can spend the whole budget thinking and emit empty
     # content with finish_reason=length. That is a failure for this question;
-    # another model in the chain may still answer it.
-    return (content, None) if content else (None, "empty content")
+    # another model in the chain may still answer it. Say WHICH kind of empty
+    # it was: a model that reasoned and ran out of room is a budget problem,
+    # not a broken channel, and benching it for a day is the wrong reaction.
+    if content:
+        return content, None
+    try:
+        msg = data["choices"][0]["message"]
+        reasoned = bool((msg.get("reasoning") or "").strip())
+    except (KeyError, IndexError, AttributeError):
+        reasoned = False
+    return None, ("empty content (spent the budget reasoning)" if reasoned
+                  else "empty content")
 
 
 def model_call(role, messages, max_tokens=None, effort=None):
@@ -2435,6 +2519,12 @@ def roles_of(model):
     return [role for role, chain in ROLE_CHAINS.items() if model in chain]
 
 
+def free_tier(entry):
+    """Is this chain entry a free model? Both spellings, provider prefix aside."""
+    _, mid = split_model(entry)
+    return mid.endswith(("-free", ":free"))
+
+
 def model_stem(mid):
     """'tencent/hy3:free' and 'hy3-free' are the same model. Reduce both to 'hy3'.
 
@@ -2444,7 +2534,7 @@ def model_stem(mid):
     same models 'vendor/name:free'. Comparing them literally found no overlap
     at all, which quietly made every substitution impossible.
     """
-    mid = (mid or "").strip().lower()
+    mid = split_model((mid or "").strip())[1].lower()
     mid = mid.rsplit("/", 1)[-1]
     for suffix in (":free", "-free", ":latest"):
         if mid.endswith(suffix):
@@ -2466,37 +2556,52 @@ def substitute_candidates(role, exclude=()):
     The ids returned are the endpoint's, because those are the ones a call can
     actually use.
 
+    Every configured provider is searched, so a model withdrawn from one
+    endpoint can be replaced by one on the other — which is the point of
+    running two: the free tiers rotate independently, and only one of them
+    currently serves a free vision model at all.
+
     Called only from the error path of a call some message caused, which keeps
     the standing property that nothing here talks to the provider on a timer.
     """
-    catalog = model_catalog()
-    if not catalog:
-        return []
     roster = fetch_roster() or {}
-    by_stem = {}
-    for mid in catalog:
-        by_stem.setdefault(model_stem(mid), mid)
-
     configured = set(configured_models())
     skip = set(exclude) | configured
     verified, unverified = [], []
-    for rid, meta in roster.items():
-        mid = by_stem.get(model_stem(rid))
-        if not mid or mid in skip or not _usable(mid):
+
+    for provider in PROVIDERS:
+        catalog = model_catalog(provider)
+        if not catalog:
             continue
-        if role == "vision" and not meta.get("vision"):
+        # THE FREE SPELLING WINS. Nous lists 'poolside/laguna-s-2.1' and
+        # 'poolside/laguna-s-2.1:free' as separate ids with the same stem, and
+        # the bare one BILLS. Taking whichever came first in the catalogue
+        # would have proposed the paid twin of a free model as a repair.
+        by_stem = {}
+        for mid in catalog:
+            stem = model_stem(mid)
+            if stem not in by_stem or (free_tier(mid) and not free_tier(by_stem[stem])):
+                by_stem[stem] = mid
+        for rid, meta in roster.items():
+            mid = by_stem.get(model_stem(rid))
+            if not mid or mid in skip or not _usable(mid):
+                continue
+            if not free_tier(mid):
+                continue  # the roster is a free roster; a paid id here is a bug
+            if role == "vision" and not meta.get("vision"):
+                continue
+            verified.append((mid, dict(meta, verified=True, provider=provider)))
+        if role == "vision":
             continue
-        verified.append((mid, dict(meta, verified=True)))
-    if role != "vision":
         known = {mid for mid, _ in verified}
         for mid in catalog:
             # Free tier only: a paid model would answer beautifully and bill
             # for it, which is not a repair the owner asked for.
-            if not mid.endswith(("-free", ":free")) or mid in skip or mid in known:
+            if not free_tier(mid) or mid in skip or mid in known:
                 continue
             if not _usable(mid):
                 continue
-            unverified.append((mid, {"verified": False}))
+            unverified.append((mid, {"verified": False, "provider": provider}))
     verified.sort(key=lambda pair: pair[1].get("context") or 0, reverse=True)
     unverified.sort(key=lambda pair: pair[0])
     return verified + unverified
@@ -2561,6 +2666,8 @@ def _describe_candidate(mid, meta):
         bits.append("vision")
     if not meta.get("verified"):
         bits.append("capability unverified")
+    if meta.get("provider") and meta["provider"] != DEFAULT_PROVIDER:
+        bits.append("via %s" % meta["provider"])
     return "%s%s" % (mid, " (%s)" % ", ".join(bits) if bits else "")
 
 
@@ -2645,12 +2752,18 @@ def safe_heal(model, err):
         return "", False
 
 
-def model_catalog():
-    """Model ids the endpoint currently offers, or None if it cannot be read."""
+def model_catalog(provider=None):
+    """Model ids one endpoint currently offers, or None if it cannot be read.
+
+    Ids come back chain-shaped ("nous:tencent/hy3:free" for any provider that
+    is not the default), because the caller's job is to put them in a chain.
+    """
+    provider = provider or DEFAULT_PROVIDER
+    conf = provider_conf(provider)
     req = urllib.request.Request(
-        CFG["api_base"] + "/models",
+        conf.get("api_base", CFG.get("api_base", "")) + "/models",
         headers={
-            "Authorization": "Bearer " + api_key(),
+            "Authorization": "Bearer " + api_key(provider),
             # Same trap as the chat endpoint: urllib's default User-Agent 403s.
             "User-Agent": "hongyan/1.0",
             "Accept": "application/json",
@@ -2660,12 +2773,13 @@ def model_catalog():
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = json.load(resp)
     except Exception as exc:  # noqa: BLE001
-        audit_fail("model_catalog", str(exc)[:120])
+        audit_fail("model_catalog", "%s | %s" % (provider, str(exc)[:110]))
         return None
+    prefix = "" if provider == DEFAULT_PROVIDER else provider + ":"
     try:
-        return [m["id"] for m in data.get("data", []) if m.get("id")]
+        return [prefix + m["id"] for m in data.get("data", []) if m.get("id")]
     except (TypeError, AttributeError):
-        audit_fail("model_catalog", "unexpected shape")
+        audit_fail("model_catalog", "%s | unexpected shape" % provider)
         return None
 
 
@@ -2694,19 +2808,31 @@ def check_models():
     questions) rather than a name match, and it ends in a human decision. This
     is only the guard that says a dependency has gone.
     """
-    catalog = model_catalog()
-    if catalog is None:
-        return "Could not read the model catalog — the API may be down or the key rejected."
+    # Each model is checked against ITS OWN endpoint. Checking a Nous id
+    # against Zen's catalogue would report every model on the smaller list as
+    # withdrawn, which is a false alarm about the chain being dead.
+    catalogs, unreadable = {}, []
+    for provider in sorted({split_model(m)[0] for m in configured_models()}):
+        cat = model_catalog(provider)
+        if cat is None:
+            unreadable.append(provider)
+        else:
+            catalogs[provider] = set(cat)
+    if not catalogs:
+        return ("Could not read the model catalog (%s) — the API may be down "
+                "or the key rejected." % ", ".join(unreadable or ["no provider"]))
 
     missing = {mid: roles for mid, roles in configured_models().items()
-               if mid not in catalog}
+               if split_model(mid)[0] in catalogs
+               and mid not in catalogs[split_model(mid)[0]]}
     if not missing:
-        return ""
+        return ("Could not reach %s; the rest of the chain checked out."
+                % ", ".join(unreadable)) if unreadable else ""
 
     lines = ["MODELS MISSING from the catalog — these will start failing:"]
     for mid, roles in sorted(missing.items()):
         lines.append("  %s (%s)" % (mid, roles))
-    free = [m for m in catalog if m.endswith(":free") or m.endswith("-free")]
+    free = sorted(m for cat in catalogs.values() for m in cat if free_tier(m))
     if free:
         lines.append("")
         lines.append("Still free and available: %s" % ", ".join(sorted(free)))

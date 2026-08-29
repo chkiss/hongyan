@@ -1504,6 +1504,25 @@ check("no renumbering slip", "gamma" in reply and "beta" not in reply.split("sti
 check("remaining list is reprinted", "still open" in reply, True)
 
 
+section("two providers in one chain")
+
+# Nous ids carry their own colon, so a naive split on ':' would read
+# 'tencent/hy3' as a provider name and call a model that does not exist.
+check("provider prefix splits once", m.split_model("nous:tencent/hy3:free"),
+      ("nous", "tencent/hy3:free"))
+check("a bare id belongs to the default provider",
+      m.split_model("hy3-free"), (m.DEFAULT_PROVIDER, "hy3-free"))
+check("an unknown prefix is part of the model name",
+      m.split_model("tencent/hy3:free"), (m.DEFAULT_PROVIDER, "tencent/hy3:free"))
+check("stems ignore the provider",
+      m.model_stem("nous:tencent/hy3:free"), m.model_stem("hy3-free"))
+check("free tier is seen through the prefix",
+      (m.free_tier("nous:tencent/hy3:free"), m.free_tier("nous:claude-opus-5")),
+      (True, False))
+check("each provider has an endpoint",
+      all(p.get("api_base") for p in m.PROVIDERS.values()), True)
+
+
 section("replacing a withdrawn model")
 
 # The endpoint spells models 'hy3-free'; the only roster with capability
@@ -1513,8 +1532,16 @@ check("stem strips vendor and free suffix", m.model_stem("tencent/hy3:free"), "h
 check("stem of the endpoint id matches", m.model_stem("hy3-free"), "hy3")
 
 _saved = (m.model_catalog, m.fetch_roster)
-m.model_catalog = lambda: ["hy3-free", "ling-3.0-flash-fin-free",
-                           "muse-spark-1.2-contributor-free", "claude-opus-5"]
+_CATALOGS = {
+    m.DEFAULT_PROVIDER: ["hy3-free", "ling-3.0-flash-fin-free",
+                         "muse-spark-1.2-contributor-free", "claude-opus-5"],
+    # Nous lists the paid and free twins of one model as separate ids; the
+    # bare one bills. The paid twin is listed FIRST on purpose here.
+    "nous": ["nous:stepfun/step-3.7-flash", "nous:stepfun/step-3.7-flash:free",
+             "nous:tencent/hy3:free"],
+}
+m.model_catalog = lambda provider=None: _CATALOGS.get(
+    provider or m.DEFAULT_PROVIDER, [])
 m.fetch_roster = lambda: {
     "inclusionai/ling-3.0-flash-fin:free": {"context": 262144, "vision": False},
     "stepfun/step-3.7-flash:free": {"context": 65536, "vision": True},
@@ -1523,17 +1550,23 @@ cands = m.substitute_candidates("answering")
 check("candidate is named the way a call can use it",
       cands[0][0], "ling-3.0-flash-fin-free")
 check("roster-described candidates come first", cands[0][1]["verified"], True)
-check("a roster model the endpoint does not serve is dropped",
-      any(c[0].startswith("step") for c in cands), False)
+check("a roster model no endpoint serves under that name is not invented",
+      any(c[0] == "step-3.7-flash-free" for c in cands), False)
+# The whole reason for two providers: Zen serves no free vision model, Nous
+# serves exactly one, so vision has a candidate only if both are searched.
+vision = m.substitute_candidates("vision")
+check("the other provider supplies the vision candidate, free spelling",
+      [c[0] for c in vision], ["nous:stepfun/step-3.7-flash:free"])
+check("and it is described as verified", vision[0][1]["verified"], True)
 check("undescribed free models are offered but flagged",
       ("muse-spark-1.2-contributor-free", False) in
       [(c[0], c[1]["verified"]) for c in cands], True)
 check("paid models are never candidates",
       any(c[0] == "claude-opus-5" for c in cands), False)
 # Vision is where guessing is precisely the mistake, so an unverified name
-# is not an option at all.
-check("vision takes only verified vision models",
-      m.substitute_candidates("vision"), [])
+# is never an option — not even to fill an empty chain.
+check("vision never takes an undescribed model",
+      any(not c[1]["verified"] for c in m.substitute_candidates("vision")), False)
 m.model_catalog, m.fetch_roster = _saved
 
 _chain_before = list(m.CFG.get("text_chain") or [])
