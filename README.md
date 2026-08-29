@@ -143,7 +143,7 @@ curl -fsSL https://raw.githubusercontent.com/chkiss/hongyan/main/install.sh | ba
 
 It fetches the code to `~/hongyan`, asks for your ACI, numbers and API key, writes the config, links the commands into `~/.local/bin`, installs the cron entries and runs the tests. Re-running it is safe: it never overwrites a config without asking and never duplicates a cron line.
 
-It checks the *format* of what you type — a UUID that is a UUID, phone numbers with country codes, a bot number that differs from yours — but it cannot tell whether the ACI is really yours or the key works, and it says so. That matters because a wrong ACI fails silently by design: unauthorised messages are dropped without a reply, so the symptom is a bot that ignores you. Text it `status`, and if nothing comes back, `tail ~/.config/hongyan/audit.log` — a `rejected` line means the ACI is wrong.
+It checks the *format* of what you type — a UUID that is a UUID, phone numbers with country codes, a bot number that differs from yours — but it cannot tell whether the ACI is really yours or the key works, and it says so. That matters because a wrong ACI fails silently by design: unauthorised messages are dropped without a reply, so the symptom is a bot that ignores you. Text it `status`, and if nothing comes back, `tail ~/.local/state/hongyan/audit.log` — a `rejected` line means the ACI is wrong.
 
 Then `hongyan-supervise` to start.
 

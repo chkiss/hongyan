@@ -21,6 +21,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # The module reads its config at import time, so give it a throwaway home.
 _TMP = tempfile.mkdtemp(prefix="siglistener-test-")
 os.environ["HOME"] = _TMP
+# The XDG roots are read from the environment now, and the environment running
+# the tests is a real one. Without this the suite would write its throwaway
+# state into the live ~/.local/state/hongyan — and on the box that matters,
+# that is the real audit log.
+for _var in ("XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME",
+             "XDG_RUNTIME_DIR"):
+    os.environ.pop(_var, None)
 os.makedirs(os.path.join(_TMP, ".config", "hongyan"))
 shutil.copy(os.path.join(ROOT, "config.example.json"),
             os.path.join(_TMP, ".config", "hongyan", "config.json"))
@@ -1502,6 +1509,33 @@ still = [i["text"] for i in m.load_queue() if not i.get("done")]
 check("list clears both named items", still, ["beta", "delta"])
 check("no renumbering slip", "gamma" in reply and "beta" not in reply.split("still open")[0], True)
 check("remaining list is reprinted", "still open" in reply, True)
+
+
+section("where things live")
+
+# Config is what a person copies between machines; state is logs and message
+# content; runtime is the socket and the pids, which should die at boot. They
+# shared one directory until 2026-08-29, which put the conversation log inside
+# the thing people paste into bug reports.
+check("config keeps its conventional home",
+      m.CONFIG_PATH, os.path.join(_TMP, ".config", "hongyan", "config.json"))
+check("state is not in the config dir",
+      m.STATE_DIR, os.path.join(_TMP, ".local", "state", "hongyan"))
+check("the audit log follows the state dir",
+      m.AUDIT_FILE.startswith(m.STATE_DIR), True)
+check("no runtime dir means state/run, never a missing path",
+      m.RUN_DIR, os.path.join(_TMP, ".local", "state", "hongyan", "run"))
+check("the socket is a runtime path",
+      m.SOCKET_PATH, os.path.join(m.RUN_DIR, "socket"))
+
+# An install that has not migrated yet still finds its own history.
+_legacy = os.path.join(_TMP, ".config", "hongyan", "legacy-probe.json")
+open(_legacy, "w").write("{}")
+check("a file left in the old place is still found",
+      m.state_path("legacy-probe.json"), _legacy)
+check("a file with no old copy resolves to the new place",
+      m.state_path("brand-new.json"), os.path.join(m.STATE_DIR, "brand-new.json"))
+os.remove(_legacy)
 
 
 section("two providers in one chain")

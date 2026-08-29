@@ -17,7 +17,8 @@
 set -uo pipefail
 
 BRIEF_URL="${HONGYAN_BRIEF_URL:-https://raw.githubusercontent.com/chkiss/hongyan/main/docs/monthly-review-brief.md}"
-DEST="$HOME/.config/hongyan"
+# The brief, the review log and the pending-approval file are state.
+DEST="${XDG_STATE_HOME:-$HOME/.local/state}/hongyan"
 BRIEF="$DEST/monthly-review-brief.md"
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }

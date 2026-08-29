@@ -1,15 +1,10 @@
 #!/bin/bash
 set -uo pipefail
 
-DIR="$HOME/.config/hongyan"
-SOCK="$DIR/socket"
-LOG="$DIR/daemon.log"
-LISTENER_LOG="$DIR/listener.log"
-DAEMON_PID="$DIR/daemon.pid"
-LISTENER_PID="$DIR/listener.pid"
-
-mkdir -p "$DIR"
-
+# These are exported before the library is sourced because the library reads
+# XDG_RUNTIME_DIR to decide where the socket goes: cron gives us no session,
+# so without this line the runtime dir would differ between a cron start and
+# a hand start, and the two would fight over two different sockets.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -23,6 +18,15 @@ else
     echo "hongyan-supervise: cannot find hongyan-lib.sh" >&2
     exit 1
 fi
+
+DIR="$HY_STATE_DIR"
+SOCK="$HY_RUN_DIR/socket"
+LOG="$HY_STATE_DIR/daemon.log"
+LISTENER_LOG="$HY_STATE_DIR/listener.log"
+DAEMON_PID="$HY_RUN_DIR/daemon.pid"
+LISTENER_PID="$HY_RUN_DIR/listener.pid"
+
+hongyan_dirs
 
 if ! hongyan_alive "$DAEMON_PID" "daemon"; then
     rm -f "$SOCK"

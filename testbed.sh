@@ -140,7 +140,7 @@ PY
     grep -v '^$' "$CRON_SERVER" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
 
     say "Review host"
-    if [ -f "$REVIEW_HOME/.config/hongyan/monthly-review-brief.md" ]; then
+    if [ -f "$REVIEW_HOME/.local/state/hongyan/monthly-review-brief.md" ]; then
         echo "  brief written"
     else
         echo "  (not set up yet)"

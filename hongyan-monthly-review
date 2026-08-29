@@ -10,7 +10,7 @@ the server. No cron send can ever precede a human conversation.
   --tick      hourly cron mode: maybe run the review; maybe poll an approval
   --dry-run   gather and judge, print the report, write nothing anywhere
 
-State lives in ~/.config/hongyan/ on THIS machine:
+State lives in ~/.local/state/hongyan/ on THIS machine:
   monthly-review-done-YYYY-MM     this month's review was sent
   monthly-review-pending.json     report sent, awaiting approve/acknowledge
 """
@@ -23,7 +23,9 @@ import sys
 import time
 import urllib.request
 
-STATE_DIR = os.path.expanduser("~/.config/hongyan")
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME")
+                         or os.path.expanduser("~/.local/state"), "hongyan")
+os.makedirs(STATE_DIR, exist_ok=True)
 ZEN_BASE = "https://opencode.ai/zen/v1"
 CHAIN = ["x-preview-f-free", "big-pickle", "hy3-free"]
 APPROVABLE_KEYS = {"text_chain", "vision_chain"}
@@ -70,8 +72,8 @@ def _ssh_target():
 
 def first_message_happened():
     """True once any audit event this month exists — i.e. the owner talked."""
-    out = ssh("grep -c '^%s' ~/.config/hongyan/audit.log "
-              "~/.config/hongyan/audit.log.1 2>/dev/null | awk -F: '{s+=$NF} END{print s+0}'"
+    out = ssh("grep -c '^%s' ~/.local/state/hongyan/audit.log "
+              "~/.local/state/hongyan/audit.log.1 2>/dev/null | awk -F: '{s+=$NF} END{print s+0}'"
               % _month())
     return out.strip() not in ("", "0")
 
@@ -126,21 +128,21 @@ def fetch_catalogue():
 
 def gather():
     cfg = json.loads(ssh("cat ~/.config/hongyan/config.json"))
-    fails = ssh("grep -h 'FAIL:' ~/.config/hongyan/audit.log "
-                "~/.config/hongyan/audit.log.1 2>/dev/null | tail -80")
+    fails = ssh("grep -h 'FAIL:' ~/.local/state/hongyan/audit.log "
+                "~/.local/state/hongyan/audit.log.1 2>/dev/null | tail -80")
     counts = {}
     for line in fails.splitlines():
         parts = line.split("\t")
         if len(parts) >= 2:
             counts[parts[1][5:]] = counts.get(parts[1][5:], 0) + 1
     state = {}
-    raw = ssh("cat ~/.config/hongyan/model_state.json 2>/dev/null")
+    raw = ssh("cat ~/.local/state/hongyan/model_state.json 2>/dev/null")
     if raw:
         state = json.loads(raw or "{}")
     queue = json.loads(ssh("python3 -c \"import json,os;"
                            "items=[json.loads(l) for l in open(os.path.expanduser("
-                           "'~/.config/hongyan/queue.jsonl'))] if os.path.exists("
-                           "os.path.expanduser('~/.config/hongyan/queue.jsonl')) else [];"
+                           "'~/.local/state/hongyan/queue.jsonl'))] if os.path.exists("
+                           "os.path.expanduser('~/.local/state/hongyan/queue.jsonl')) else [];"
                            "print(json.dumps({'open':sum(1 for i in items if not i.get('done')),"
                            "'actions':sum(1 for i in items if not i.get('done') and "
                            "i.get('kind')=='action')}))\"") or "{}")
@@ -231,7 +233,7 @@ CLOSING = ("Reply 'approve' to apply all proposed changes, 'acknowledge' if "
 def send_report(report, proposals):
     keywords = ["approve", "acknowledge"]
     kw_file = "monthly-reply-keywords-%s.txt" % _today()
-    ssh("printf '%s\\n' %s > ~/.config/hongyan/%s"
+    ssh("printf '%s\\n' %s > ~/.local/state/hongyan/%s"
         % ("\\n".join(keywords), " ".join(keywords), kw_file))
     full = report if CLOSING in report else report + "\n" + CLOSING
     subprocess.run(["ssh", "-o", "BatchMode=yes", SSH,
@@ -253,7 +255,7 @@ def apply_proposals(proposals):
         if ssh("python3 -c %s && echo APPLIED" % json.dumps(script)) .endswith("APPLIED"):
             applied.append(key)
     if applied:
-        pid = ssh("cat ~/.config/hongyan/listener.pid")
+        pid = ssh("cat \"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}\"/hongyan/listener.pid")
         if pid:
             ssh("kill %s; sleep 1; ~/.local/bin/hongyan-supervise" % pid)
     return applied
@@ -262,7 +264,7 @@ def apply_proposals(proposals):
 def tick(dry=False):
     pend = load_pending()
     if pend:
-        reply = ssh("cat ~/.config/hongyan/monthly-reply-%s 2>/dev/null"
+        reply = ssh("cat ~/.local/state/hongyan/monthly-reply-%s 2>/dev/null"
                     % pend["sent"])
         now = time.time()
         if "approve" in reply.lower().split() or reply.strip().lower() == "approve":

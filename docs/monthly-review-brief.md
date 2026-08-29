@@ -6,7 +6,7 @@ The server can do a version of this review by itself (offered in conversation wh
 
 ## 0. When to run
 
-Only after the owner has messaged the server this month. Check the newest `YYYY-MM` prefix in `~/.config/hongyan/audit.log` over SSH: if no entry is dated this month, the month has produced no conversation and there is nothing to review yet — exit quietly. No scheduled send may ever precede a message the owner sent.
+Only after the owner has messaged the server this month. Check the newest `YYYY-MM` prefix in `~/.local/state/hongyan/audit.log` over SSH: if no entry is dated this month, the month has produced no conversation and there is nothing to review yet — exit quietly. No scheduled send may ever precede a message the owner sent.
 
 ## 1. Roster and capability gaps
 
@@ -20,11 +20,11 @@ Compare against what the server actually runs: `text_chain` and `vision_chain` i
 
 For each configured model check: presence in the catalogue, cost (Free vs paid), context length, and image-input capability — every `vision_chain` entry must accept images or photo questions break. Judge suitability, not just availability: a model tuned for agentic coding is not the one you want answering grammar questions. Propose wiring changes **only where a real gap exists**; if none, say so in one line.
 
-Also read `~/.config/hongyan/model_state.json`: each benched channel with `"until": null` is disabled awaiting a human decision — recurring bench patterns (`FAIL:model_benched` in the log) belong in the report. Queue items of kind `action` are unresolved decisions the owner has been promised about.
+Also read `~/.local/state/hongyan/model_state.json`: each benched channel with `"until": null` is disabled awaiting a human decision — recurring bench patterns (`FAIL:model_benched` in the log) belong in the report. Queue items of kind `action` are unresolved decisions the owner has been promised about.
 
 ## 2. Defects in the log
 
-Read `~/.config/hongyan/audit.log` **and** its rotated archive `audit.log.1` — the live file holds only the most recent ~800 lines, so a month is usually split across both.
+Read `~/.local/state/hongyan/audit.log` **and** its rotated archive `audit.log.1` — the live file holds only the most recent ~800 lines, so a month is usually split across both.
 
 Start by grepping for `FAIL:`. The listener tags every defect that way (`FAIL:vision`, `FAIL:quote_unresolved`, `FAIL:model_error`, `FAIL:history_truncated`, …). Anything without that tag is ordinary routing. If `FAIL:` returns nothing, say the log is clean — do not go hunting through normal lines for something to report.
 
@@ -50,8 +50,8 @@ End with: `Reply 'approve' to apply all proposed changes, 'acknowledge' if nothi
 
 The server has no route back to this machine, so replies are matched by keyword and polled for.
 
-1. Before sending, write `~/.config/hongyan/monthly-reply-keywords-YYYY-MM-DD.txt` on the server — one keyword per line: `approve`, `acknowledge`, plus any custom tokens used in that month's message.
-2. The listener watches owner messages for those keywords and writes `~/.config/hongyan/monthly-reply-YYYY-MM-DD.txt` when one matches. This is idempotent.
+1. Before sending, write `~/.local/state/hongyan/monthly-reply-keywords-YYYY-MM-DD.txt` on the server — one keyword per line: `approve`, `acknowledge`, plus any custom tokens used in that month's message.
+2. The listener watches owner messages for those keywords and writes `~/.local/state/hongyan/monthly-reply-YYYY-MM-DD.txt` when one matches. This is idempotent.
 3. Poll for that file: every 60 seconds for 30 minutes, then hourly for 24 hours. On a match, read it and act. On timeout, log that no reply arrived and stop.
 
 Apply changes only on an explicit `approve`. Everything up to that point is read-only.

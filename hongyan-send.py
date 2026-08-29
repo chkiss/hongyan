@@ -14,8 +14,15 @@ import socket
 import subprocess
 import sys
 
-DIR = os.path.expanduser("~/.config/hongyan")
-SOCK = os.path.join(DIR, "socket")
+# Same XDG split as hongyan_listener.py: config where a person keeps config,
+# the socket in the runtime dir where it dies at boot.
+DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                   or os.path.expanduser("~/.config"), "hongyan")
+_RUN = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
+        if os.environ.get("XDG_RUNTIME_DIR")
+        else os.path.join(os.environ.get("XDG_STATE_HOME")
+                          or os.path.expanduser("~/.local/state"),
+                          "hongyan", "run"))
 SIGNAL_CLI = os.path.expanduser("~/.local/bin/signal-cli")
 
 try:
@@ -32,6 +39,7 @@ if not OWNER:
           file=sys.stderr)
     sys.exit(1)
 
+SOCK = os.path.expanduser(_CFG.get("socket") or os.path.join(_RUN, "socket"))
 TRANSPORT = _CFG.get("transport", "bot_account")
 
 

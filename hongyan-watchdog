@@ -16,14 +16,19 @@
 # Liveness uses PID files, not `pgrep -f` — see hongyan-lib.sh for why.
 set -uo pipefail
 
-DIR="$HOME/.config/hongyan"
-HEARTBEAT="$DIR/heartbeat"
-LOG="$DIR/watchdog.log"
-DAEMON_PID="$DIR/daemon.pid"
-LISTENER_PID="$DIR/listener.pid"
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+for _lib in "$_hy_dir/hongyan-lib.sh" "$HOME/.local/bin/hongyan-lib.sh"; do
+    [ -f "$_lib" ] && { . "$_lib"; break; }
+done
+
+DIR="$HY_STATE_DIR"
+HEARTBEAT="$HY_STATE_DIR/heartbeat"
+LOG="$HY_STATE_DIR/watchdog.log"
+DAEMON_PID="$HY_RUN_DIR/daemon.pid"
+LISTENER_PID="$HY_RUN_DIR/listener.pid"
 MODE="${1:---restart}"
 
-mkdir -p "$DIR"
+hongyan_dirs
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
 # Rotate here, at the top. It used to sit after the case statement, but the
@@ -48,8 +53,8 @@ listener_up() { hongyan_alive "$LISTENER_PID" "hongyan_listener"; }
 
 case "$MODE" in
 --restart)
-    FAILS="$DIR/restart_fails"
-    DOWN_SINCE="$DIR/down_since"
+    FAILS="$HY_STATE_DIR/restart_fails"
+    DOWN_SINCE="$HY_STATE_DIR/down_since"
 
     if daemon_up && listener_up; then
         # Recovered. Say so if it was ever actually down: messages sent during
@@ -125,7 +130,7 @@ case "$MODE" in
     # copy here drifted apart the moment anyone moved attachment_dir.
     ATT_DIR="$(/usr/bin/python3 -c '
 import json, os
-cfg = json.load(open(os.path.expanduser("~/.config/hongyan/config.json")))
+cfg = json.load(open(os.path.join(os.environ["HY_CONFIG_DIR"], "config.json")))
 print(os.path.expanduser(cfg.get("attachment_dir")
                          or "~/.local/share/signal-cli/attachments"))
 ' 2>/dev/null || true)"
@@ -138,8 +143,8 @@ print(os.path.expanduser(cfg.get("attachment_dir")
     # the moment it happened. Temporary benches self-expire quietly.
     bench_report="$(/usr/bin/python3 -c '
 import json, os, sys, time
-cfg = json.load(open(os.path.expanduser("~/.config/hongyan/config.json")))
-state = json.load(open(os.path.expanduser("~/.config/hongyan/model_state.json")))
+cfg = json.load(open(os.path.join(os.environ["HY_CONFIG_DIR"], "config.json")))
+state = json.load(open(os.path.join(os.environ["HY_STATE_DIR"], "model_state.json")))
 chains = set(cfg.get("text_chain") or []) | set(cfg.get("vision_chain") or [])
 mc = cfg.get("model_classify")
 if mc:

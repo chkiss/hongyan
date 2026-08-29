@@ -44,14 +44,78 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 
-CONFIG_PATH = os.path.expanduser("~/.config/hongyan/config.json")
-STATE_DIR = os.path.expanduser("~/.config/hongyan")
-QUEUE_FILE = os.path.join(STATE_DIR, "queue.jsonl")
-AUDIT_FILE = os.path.join(STATE_DIR, "audit.log")
-SEEN_FILE = os.path.join(STATE_DIR, "seen.json")
-KILL_FILE = os.path.join(STATE_DIR, "disabled")
-MUTE_FILE = os.path.join(STATE_DIR, "muted-until")
-HEARTBEAT = os.path.join(STATE_DIR, "heartbeat")
+# --------------------------------------------------------------------------
+# Where things live (XDG Base Directory)
+#
+# One directory used to hold all four kinds at once: the config, the API key,
+# every log and state file, and the socket. The config directory is the one a
+# person copies to a new machine, backs up, or pastes into a bug report — and
+# audit.log and history.json are message CONTENT. Separating them is what
+# makes "send me your config" a safe thing to say.
+#
+#   config   ~/.config/hongyan        config.json, the key   (unchanged)
+#   state    ~/.local/state/hongyan   logs, queue, history, model state
+#   runtime  $XDG_RUNTIME_DIR/hongyan socket, pids, locks — wiped at boot,
+#                                     which is the correct lifetime for them
+#   data     ~/.local/share/hongyan   the speech-to-text model
+#
+# Every root honours its XDG variable first, so the testbed and the Windows
+# install stop needing special cases. RUN_DIR falls back INTO the state dir
+# when there is no runtime dir (no lingering session, a container, Windows):
+# a socket that vanishes is better than a socket that never appears.
+# --------------------------------------------------------------------------
+
+
+def _xdg(var, default, app="hongyan"):
+    root = os.environ.get(var) or os.path.expanduser(default)
+    return os.path.join(root, app)
+
+
+CONFIG_DIR = _xdg("XDG_CONFIG_HOME", "~/.config")
+STATE_DIR = _xdg("XDG_STATE_HOME", "~/.local/state")
+DATA_DIR = _xdg("XDG_DATA_HOME", "~/.local/share")
+RUN_DIR = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
+           if os.environ.get("XDG_RUNTIME_DIR")
+           else os.path.join(STATE_DIR, "run"))
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+SOCKET_PATH = os.path.join(RUN_DIR, "socket")
+
+# Everything used to live in the config directory. A file still sitting there
+# is read from there until the migration moves it, so an old install that
+# pulls this code keeps its queue, its history and its bench state.
+LEGACY_DIR = CONFIG_DIR
+
+
+# Created at import, not in main(): every entry point that touches state —
+# the listener, --digest, the watchdog's inline python, the tests — needs the
+# directory to exist, and only one of them runs main().
+for _dir in (STATE_DIR, RUN_DIR):
+    try:
+        os.makedirs(_dir, exist_ok=True)
+    except OSError:
+        pass
+try:
+    os.chmod(STATE_DIR, 0o700)  # message content lives here
+except OSError:
+    pass
+
+
+def state_path(name):
+    """Where a state file is, preferring the new home but finding the old one."""
+    new = os.path.join(STATE_DIR, name)
+    if not os.path.exists(new):
+        old = os.path.join(LEGACY_DIR, name)
+        if os.path.exists(old):
+            return old
+    return new
+
+
+QUEUE_FILE = state_path("queue.jsonl")
+AUDIT_FILE = state_path("audit.log")
+SEEN_FILE = state_path("seen.json")
+KILL_FILE = state_path("disabled")
+MUTE_FILE = state_path("muted-until")
+HEARTBEAT = state_path("heartbeat")
 # --------------------------------------------------------------------------
 # Monthly-reply keyword detection (local job polls hetz for the reply file)
 # --------------------------------------------------------------------------
@@ -61,10 +125,10 @@ def _today_iso():
     return _dt.date.today().isoformat()
 
 def _reply_keywords_path():
-    return os.path.join(STATE_DIR, "monthly-reply-keywords-%s.txt" % _today_iso())
+    return state_path("monthly-reply-keywords-%s.txt" % _today_iso())
 
 def _reply_file_path():
-    return os.path.join(STATE_DIR, "monthly-reply-%s.txt" % _today_iso())
+    return state_path("monthly-reply-%s.txt" % _today_iso())
 
 def _load_keywords():
     p = _reply_keywords_path()
@@ -146,7 +210,7 @@ def audit_fail(kind, detail=""):
     logged nothing at all. The monthly review reads this file; a defect that
     does not appear here cannot be found. `FAIL:` makes them greppable:
 
-        grep FAIL: ~/.config/hongyan/audit.log
+        grep FAIL: ~/.local/state/hongyan/audit.log
     """
     audit("FAIL:" + kind, detail)
 
@@ -190,7 +254,7 @@ def save_seen(seen):
     os.replace(tmp, SEEN_FILE)
 
 
-HISTORY_FILE = os.path.join(STATE_DIR, "history.json")
+HISTORY_FILE = state_path("history.json")
 HISTORY_KEEP = 40
 HISTORY_MAX_AGE = 86400  # a day of context is available; the router picks from it
 
@@ -872,7 +936,7 @@ def queue_digest():
 # ignored past its window all count, which is what makes "expire silently" work.
 # --------------------------------------------------------------------------
 
-OFFERS_FILE = os.path.join(STATE_DIR, "offers.json")
+OFFERS_FILE = state_path("offers.json")
 REVIEW_OFFER_TTL = 86400       # how long a 'yes' stays answerable after the offer
 DIGEST_OFFER_TTL = 6 * 3600
 
@@ -1000,7 +1064,7 @@ REVIEW_RUN_RE = re.compile(
     re.I)
 
 
-ONBOARD_FILE = os.path.join(STATE_DIR, "onboarding.json")
+ONBOARD_FILE = state_path("onboarding.json")
 ONBOARD_TTL = 3600   # how long a 'yes' stays answerable after the offer
 
 _ONBOARD_NOISE = re.compile(
@@ -1263,7 +1327,7 @@ def cmd_keepalive():
         return "no heartbeat file"
 
 
-UPDATE_LOG = os.path.join(STATE_DIR, "update.log")
+UPDATE_LOG = state_path("update.log")
 # realpath, not abspath: installs run through a symlink in ~/.local/bin, and
 # git must be asked about the checkout, not about a bin directory.
 REPO_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -1427,7 +1491,7 @@ def t2_mute(arg):
 def t2_kill(_arg):
     with open(KILL_FILE, "w") as fh:
         fh.write(datetime.now(timezone.utc).isoformat())
-    return "command processing DISABLED. delete ~/.config/hongyan/disabled to re-enable"
+    return "command processing DISABLED. delete %s to re-enable" % KILL_FILE
 
 
 # --------------------------------------------------------------------------
@@ -1437,7 +1501,7 @@ def t2_kill(_arg):
 # hallucinate one.
 # --------------------------------------------------------------------------
 
-MEMORY_FILE = os.path.join(STATE_DIR, "memory.md")
+MEMORY_FILE = state_path("memory.md")
 MEMORY_INJECT_LINES = 40
 
 
@@ -1921,7 +1985,7 @@ describe_image.last_was_exhausted = False
 # described from nothing.
 # --------------------------------------------------------------------------
 
-PENDING_IMAGES_FILE = os.path.join(STATE_DIR, "pending_images.json")
+PENDING_IMAGES_FILE = state_path("pending_images.json")
 DEFERRED_IMAGE_TTL = 48 * 3600
 
 
@@ -2065,14 +2129,14 @@ def api_key(provider=None):
         return ""
 
 
-MODEL_STATE_FILE = os.path.join(STATE_DIR, "model_state.json")
+MODEL_STATE_FILE = state_path("model_state.json")
 BENCH_SECONDS = 86400
 
 # Per-day token accounting. The Zen response already carries usage on every
 # call and we were discarding it; against a free-tier cap whose size the
 # provider does not publish, watching consumption is the only early warning
 # there is.
-USAGE_FILE = os.path.join(STATE_DIR, "usage.json")
+USAGE_FILE = state_path("usage.json")
 
 
 def _record_usage(usage):
@@ -2441,7 +2505,7 @@ def raise_action_item(model, err):
     audit("action_item", marker)
 
 
-MODEL_GONE_FILE = os.path.join(STATE_DIR, "model_gone.json")
+MODEL_GONE_FILE = state_path("model_gone.json")
 _MODEL_GONE_RE = re.compile(
     r"404|not found|no such model|does not exist|unavailable|requires available credits|"
     r"free usage exceeded|add credits|decommission|deprecat", re.I)
@@ -2840,7 +2904,7 @@ def check_models():
     return "\n".join(lines)
 
 
-ROSTER_FILE = os.path.join(STATE_DIR, "roster.json")
+ROSTER_FILE = state_path("roster.json")
 ROSTER_URL = "https://portal.nousresearch.com/api/nous/recommended-models"
 
 
@@ -3706,7 +3770,7 @@ _DNS_VERDICT_TTL_FAILURE = 15    # resolver blips recover; re-ask soon
 _DNS_VERDICT_TTL_NXDOMAIN = 86400  # "no such host" is a fact, not a blip
 _dns_verdicts = {}
 _nxdomain_hosts = set()
-NXDOMAIN_FILE = os.path.join(STATE_DIR, "nxdomain.json")
+NXDOMAIN_FILE = state_path("nxdomain.json")
 
 
 def _load_nxdomain():
@@ -4960,7 +5024,13 @@ def _request_shutdown(signum, _frame):
 
 def main():
     os.makedirs(STATE_DIR, exist_ok=True)
-    client = Client(CFG["socket"])
+    # The runtime dir is wiped at boot by design, so it is created on every
+    # start rather than once at install time.
+    os.makedirs(RUN_DIR, exist_ok=True)
+    # The socket is a runtime path, so it is derived rather than configured —
+    # a config file that pins /run/user/1000 is a config file that breaks on
+    # another machine. An explicit "socket" still wins for anyone who needs it.
+    client = Client(os.path.expanduser(CFG.get("socket") or SOCKET_PATH))
     start_webhook_receiver(client)
     audit("start", "listener connected")
     seen = load_seen()

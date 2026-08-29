@@ -1,11 +1,10 @@
 {
-  "_comment": "Copy to ~/.config/hongyan/config.json and edit. The ACI is the ONLY authentication — Signal validates it cryptographically. Phone numbers are display attributes and are never used to authorize.",
+  "_comment": "Copy to ~/.config/hongyan/config.json and edit. This file is CONFIG only: logs, queue and message history live in ~/.local/state/hongyan, the socket and pids in $XDG_RUNTIME_DIR/hongyan, the speech-to-text model in ~/.local/share/hongyan — so this directory can be copied or backed up without carrying your conversations along. All four roots honour their XDG_* variables. The ACI is the ONLY authentication — Signal validates it cryptographically. Phone numbers are display attributes and are never used to authorize.",
   "bot_number": "+15550000000",
   "owner_aci": "00000000-0000-0000-0000-000000000000",
   "owner_number": "+15550000001",
   "_transport_note": "bot_account (default, recommended) = hongyan has its own Signal account and a second phone number, and can only ever see messages addressed to it. note_to_self = hongyan is a LINKED DEVICE on YOUR account and answers in Note to Self, so no second number is needed — but a linked device receives a copy of every conversation you have, and anyone who compromises this server gets your whole Signal account, not a throwaway bot. Read the README before choosing it.",
   "transport": "bot_account",
-  "socket": "~/.config/hongyan/socket",
   "_freshness_note": "Messages older than this are answered with a notice instead of acted on, so a backlog cannot replay after downtime.",
   "max_message_age_seconds": 900,
   "_throttle_note": "Burst cooldown, not an hourly cap. A cap punishes normal conversation and fails silently; a cooldown only reacts to a genuine flood, always announces itself, and clears on its own.",
@@ -99,5 +98,6 @@
   "webhook_token": "",
   "_http_probes_note": "Any JSON API becomes a probe: name -> {url, key or key_file, key_header, path (dot path, [*] collects), desc}. The model picks the NAME; the URL and key stay in config.",
   "_media_apps_note": "qbittorrent: {url, user, pass or pass_file} -> downloads command. overseerr: {url, key or key_file} -> requests command. sonarr/radarr: {url, key or key_file} -> releases command.",
-  "_webhook_note": "If webhook_port is set, the listener listens on 127.0.0.1:<port> for POST /sonarr|/radarr|/plex — point the apps webhooks at it and events arrive as Signal messages. webhook_token (optional) is checked as ?token= or X-Hongyan-Token."
+  "_webhook_note": "If webhook_port is set, the listener listens on 127.0.0.1:<port> for POST /sonarr|/radarr|/plex — point the apps webhooks at it and events arrive as Signal messages. webhook_token (optional) is checked as ?token= or X-Hongyan-Token.",
+  "_socket_note": "The daemon socket is derived, not configured: $XDG_RUNTIME_DIR/hongyan/socket, falling back to ~/.local/state/hongyan/run/socket where there is no runtime dir. Set \"socket\" here only if you need a specific path — pinning /run/user/<uid> in a config file is what breaks it on the next machine."
 }

@@ -8,13 +8,18 @@
 # One-time setup on the server:
 #   git clone https://github.com/ggml-org/whisper.cpp ~/whisper.cpp
 #   cmake -S ~/whisper.cpp -B ~/whisper.cpp/build && cmake --build ~/whisper.cpp/build -j2
-#   cp ~/whisper.cpp/models/ggml-tiny.en.bin ~/.config/hongyan/
+#   cp ~/whisper.cpp/models/ggml-tiny.en.bin ~/.local/share/hongyan/
 #   ln -s ~/whisper.cpp/build/bin/whisper-cli ~/.local/bin/whisper-cli
 # Then point config.json at this script:  "stt": {"command": "~/.local/bin/hongyan-stt"}
 set -euo pipefail
 
 WHISPER_BIN="${WHISPER_BIN:-$HOME/.local/bin/whisper-cli}"
-MODEL="${HONGYAN_STT_MODEL:-$HOME/.config/hongyan/ggml-tiny.en.bin}"
+# The model is DATA, not config: a few dozen megabytes of weights do not
+# belong in the directory a person copies between machines. The old
+# location still works so an install that has one there keeps speaking.
+MODEL="${HONGYAN_STT_MODEL:-${XDG_DATA_HOME:-$HOME/.local/share}/hongyan/ggml-tiny.en.bin}"
+[ -e "$MODEL" ] || [ ! -e "$HOME/.config/hongyan/ggml-tiny.en.bin" ] || \
+    MODEL="$HOME/.config/hongyan/ggml-tiny.en.bin"
 
 [ -x "$WHISPER_BIN" ] || { echo "whisper-cli not found at $WHISPER_BIN" >&2; exit 3; }
 [ -f "$MODEL" ]       || { echo "model not found at $MODEL" >&2; exit 3; }

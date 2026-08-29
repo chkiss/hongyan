@@ -19,23 +19,25 @@
 
 set -uo pipefail
 
-DIR="$HOME/.config/hongyan"
-LOG="$DIR/update.log"
-
 _hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
 REPO="$_hy_dir"
 [ -f "$REPO/hongyan_listener.py" ] || { echo "hongyan-autoupdate: no repo at $REPO" >&2; exit 1; }
 
+# Sourced before any path is named: the library defines the four XDG roots,
+# and `set -u` turns using one early into a hard failure rather than a quiet
+# empty string.
 if [ -f "$_hy_dir/hongyan-lib.sh" ]; then
     . "$_hy_dir/hongyan-lib.sh"
 elif [ -f "$HOME/.local/bin/hongyan-lib.sh" ]; then
     . "$HOME/.local/bin/hongyan-lib.sh"
 fi
 
-mkdir -p "$DIR"
+DIR="$HY_STATE_DIR"
+LOG="$HY_STATE_DIR/update.log"
+hongyan_dirs
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
-LOCK="$DIR/update.lock"
+LOCK="$HY_RUN_DIR/update.lock"
 exec 9>"$LOCK"
 flock -n 9 || exit 0
 
@@ -85,7 +87,7 @@ fi
 # keeps the descriptor open. The first update worked; every later one then
 # found the lock held by the thing the previous update started, and exited
 # here in silence. Never let the survivor inherit the lock.
-LISTENER_PID="$DIR/listener.pid"
+LISTENER_PID="$HY_RUN_DIR/listener.pid"
 if [ -f "$LISTENER_PID" ]; then
     kill "$(cat "$LISTENER_PID")" 2>/dev/null
     # The listener drains gracefully now — it finishes the message in flight
@@ -105,7 +107,7 @@ if hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
 else
     log "restart FAILED after update to $(git rev-parse --short HEAD)"
     /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-        "hongyan updated but the listener did not come back up. Watchdog will keep trying; check ~/.config/hongyan/listener.log." \
+        "hongyan updated but the listener did not come back up. Watchdog will keep trying; check $HY_STATE_DIR/listener.log." \
         >> "$LOG" 2>&1
     exit 1
 fi
