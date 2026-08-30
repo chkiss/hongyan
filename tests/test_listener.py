@@ -152,6 +152,46 @@ check("range leaves the neighbours alone",
 m.t2_done("all")
 
 
+# --------------------------------------------- shutdown while nothing runs ---
+section("an idle listener can still be stopped")
+
+# lines() blocked forever on an empty inbox, so SIGTERM was only noticed when
+# the next message arrived. The update job killed the listener, waited 25s,
+# gave up, and supervise found the old process alive and started nothing —
+# the box served the previous code while update.log said "now running <sha>".
+import queue as _queuelib
+import threading as _threading
+
+_client = object.__new__(m.Client)
+_client.inbox = _queuelib.Queue()
+_client._read_loop = lambda: None
+
+_drained = []
+_stopped = _threading.Event()
+
+
+def _consume():
+    for _item in _client.lines():
+        _drained.append(_item)
+    _stopped.set()
+
+
+m._SHUTDOWN.set()
+_t = _threading.Thread(target=_consume, daemon=True)
+_t.start()
+_t.join(timeout=10)
+m._SHUTDOWN.clear()
+check("an idle listener returns on shutdown", _stopped.is_set(), True)
+check("and it drops nothing on the way out", _drained, [])
+
+# The update job must not call an unchanged pid a successful restart.
+_au = open(os.path.join(ROOT, "hongyan-autoupdate")).read()
+check("the update compares the pid before and after",
+      'NEW_PID" != "$OLD_PID' in _au, True)
+check("a listener that ignores SIGTERM is forced", "kill -9" in _au, True)
+check("an update that is not live says so", "is NOT live" in _au, True)
+
+
 # ------------------------------------------------- alerts actually send ---
 section("the alert path agrees with cron")
 

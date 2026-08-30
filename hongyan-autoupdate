@@ -88,6 +88,7 @@ fi
 # found the lock held by the thing the previous update started, and exited
 # here in silence. Never let the survivor inherit the lock.
 LISTENER_PID="$HY_RUN_DIR/listener.pid"
+OLD_PID="$(cat "$LISTENER_PID" 2>/dev/null || true)"
 if [ -f "$LISTENER_PID" ]; then
     kill "$(cat "$LISTENER_PID")" 2>/dev/null
     # The listener drains gracefully now — it finishes the message in flight
@@ -98,12 +99,31 @@ if [ -f "$LISTENER_PID" ]; then
         hongyan_alive "$LISTENER_PID" "hongyan_listener" || break
         sleep 1
     done
+    # It has had its graceful window. A listener that is still here after
+    # that is wedged, and leaving it alive is worse than killing it: supervise
+    # would see it, start nothing, and the update would quietly not happen.
+    if hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
+        log "listener ignored SIGTERM for 25s — forcing"
+        kill -9 "$(cat "$LISTENER_PID")" 2>/dev/null
+        sleep 1
+    fi
 fi
 "$HOME/.local/bin/hongyan-supervise" 9>&-
 sleep 3
 
-if hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
+NEW_PID="$(cat "$LISTENER_PID" 2>/dev/null || true)"
+if hongyan_alive "$LISTENER_PID" "hongyan_listener" \
+        && [ "$NEW_PID" != "$OLD_PID" ]; then
     log "now running $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
+elif hongyan_alive "$LISTENER_PID" "hongyan_listener"; then
+    # Alive, but it is the SAME process: the old code is still serving and
+    # the checkout has moved underneath it. Saying "now running <sha>" here
+    # is how an update reports a success it never had.
+    log "update to $(git rev-parse --short HEAD) is NOT live — pid $NEW_PID never restarted"
+    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+        "hongyan pulled $(git rev-parse --short HEAD) but the old listener would not restart, so the box is still running the previous code. Needs a human on hetz." \
+        >> "$LOG" 2>&1
+    exit 1
 else
     log "restart FAILED after update to $(git rev-parse --short HEAD)"
     /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \

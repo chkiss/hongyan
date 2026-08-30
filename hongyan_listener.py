@@ -5167,7 +5167,20 @@ class Client:
         """
         threading.Thread(target=self._read_loop, daemon=True).start()
         while True:
-            item = self.inbox.get()
+            # A blocking get() meant SIGTERM was only noticed when the next
+            # message arrived, which on a quiet evening is hours. The update
+            # job kills the listener, waits 25s, gives up, and supervise then
+            # finds the old process still alive and starts nothing — so the
+            # box kept serving the previous code while the log said "now
+            # running <new sha>". Waking once a second costs nothing and
+            # makes the shutdown flag mean what it says.
+            if _SHUTDOWN.is_set():
+                audit("listener_exit", "shutdown honoured while idle")
+                return
+            try:
+                item = self.inbox.get(timeout=1)
+            except queuelib.Empty:
+                continue
             if item is None:
                 audit("listener_exit", "socket lost - clean exit for watchdog restart")
                 sys.exit(1)
