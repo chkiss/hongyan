@@ -3,8 +3,10 @@
 # Every real value (ACI, both phone numbers, the API key) lives ONLY in
 # ~/.config/hongyan/config.json, outside this tree. The rules below are the
 # first line; scripts/scan-identity.py is the second, and it runs as a
-# pre-commit hook and again over every tracked file in the test suite, so
-# nobody has to read a diff to catch a leak.
+# pre-commit hook, again as a pre-push hook over the blobs a push introduces
+# (which catches commits the commit hook never saw), and a third time over
+# every tracked file in the test suite, so nobody has to read a diff to catch
+# a leak.
 config.json
 config.json.*
 *.key

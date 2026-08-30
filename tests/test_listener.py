@@ -1851,6 +1851,42 @@ try:
 finally:
     os.path.exists(_probe) and os.remove(_probe)
 
+# --range is what pre-push runs. The case that matters is the one the commit
+# hook and a tip-tree scan both miss: a secret committed and then deleted, so
+# the branch looks clean while the history being pushed still carries it.
+_rangedir = tempfile.mkdtemp(prefix="hongyan-range-")
+try:
+    def _g(*a):
+        return subprocess.run(("git", "-C", _rangedir) + a,
+                              capture_output=True, text=True)
+    _g("init", "-q", "-b", "main")
+    _g("config", "user.email", "t@example.invalid")
+    _g("config", "user.name", "t")
+    with open(os.path.join(_rangedir, "ok.txt"), "w") as fh:
+        fh.write("nothing here\n")
+    _g("add", "-A"); _g("commit", "-qm", "base")
+    _base = _g("rev-parse", "HEAD").stdout.strip()
+
+    with open(os.path.join(_rangedir, "leak.txt"), "w") as fh:
+        fh.write("aci = %s\n" % ("+1" + "336" + "555" + "0177"))
+    _g("add", "-A"); _g("commit", "-qm", "oops")
+    os.remove(os.path.join(_rangedir, "leak.txt"))
+    _g("add", "-A"); _g("commit", "-qm", "removed it again")
+
+    _repo = _ident.REPO
+    _ident.REPO = _rangedir
+    try:
+        # Tip is clean — this is exactly why scanning the tip is not enough.
+        check("deleted secret is gone from the tip", _ident.scan(), [])
+        check("but --range still finds it",
+              len(_ident.scan(rev_range="%s..HEAD" % _base)), 1)
+        check("a clean range passes",
+              _ident.scan(rev_range="%s..%s" % (_base, _base)), [])
+    finally:
+        _ident.REPO = _repo
+finally:
+    shutil.rmtree(_rangedir, ignore_errors=True)
+
 
 section("unknown cli flag dies")
 

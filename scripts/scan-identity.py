@@ -22,7 +22,16 @@ Two independent checks, because each catches what the other misses:
    what catches a teammate's identity rather than the owner's.
 
 Exit 0 clean, 1 with findings printed. --staged scans what is about to be
-committed; the default scans everything tracked.
+committed; --range A..B scans every blob the commits in that range introduce,
+which is what a push actually hands to GitHub; the default scans everything
+tracked.
+
+--range exists because the commit hook only sees commits made through it. A
+push can carry commits made in another clone, with --no-verify, or rebased
+back into the branch, and a secret that was added and then deleted two commits
+later is still in the history being pushed. Scanning the range's blobs — not
+just the tip tree — is the difference between checking what the branch looks
+like now and checking what is actually leaving the machine.
 """
 import hashlib
 import json
@@ -108,37 +117,89 @@ def _content(path, staged):
         return ""
 
 
-def scan(staged=False):
+def _range_blobs(rev_range):
+    """(label, blob sha) for every file version the range introduces.
+
+    Deduplicated by blob sha: a file untouched across twenty commits is one
+    blob and gets scanned once, so the cost tracks what actually changed
+    rather than the length of the range.
+    """
+    out, seen = [], set()
+    revs = _git("rev-list", rev_range).stdout.decode().split()
+    for commit in revs:
+        raw = _git("diff-tree", "-r", "--no-commit-id", "--diff-filter=ACM",
+                   commit).stdout.decode("utf-8", "replace")
+        for line in raw.split("\n"):
+            if not line.startswith(":"):
+                continue
+            meta, _, path = line.partition("\t")
+            fields = meta.split()
+            if len(fields) < 4:
+                continue
+            blob = fields[3]
+            if blob in seen or set(blob) == {"0"}:
+                continue
+            seen.add(blob)
+            out.append(("%s:%s" % (commit[:8], path), blob))
+    return out
+
+
+def _scan_text(path, text, secrets):
+    findings = []
+    for lineno, line in enumerate(text.split("\n"), 1):
+        for label, pattern in PATTERNS:
+            for hit in pattern.findall(line):
+                if hit in PLACEHOLDERS:
+                    continue
+                digest = hashlib.sha256(hit.encode()).hexdigest()
+                if digest in secrets:
+                    findings.append("%s:%d: the real %s from config.json"
+                                    % (path, lineno, secrets[digest]))
+                else:
+                    findings.append(
+                        "%s:%d: %s that is not a known placeholder (%s…)"
+                        % (path, lineno, label, hit[:6]))
+    return findings
+
+
+def scan(staged=False, rev_range=None):
     secrets = _secret_hashes()
     findings = []
+    me = os.path.basename(__file__)
+
+    if rev_range:
+        for label, blob in _range_blobs(rev_range):
+            if os.path.basename(label.split(":", 1)[1]) == me:
+                continue  # this file names the placeholders it allows
+            text = _git("cat-file", "blob", blob).stdout.decode(
+                "utf-8", "replace")
+            if text:
+                findings += _scan_text(label, text, secrets)
+        return findings
+
     for path in _tracked_files(staged):
-        if os.path.basename(path) == os.path.basename(__file__):
-            continue  # this file names the placeholders it allows
-        text = _content(path, staged)
-        if not text:
+        if os.path.basename(path) == me:
             continue
-        for lineno, line in enumerate(text.split("\n"), 1):
-            for label, pattern in PATTERNS:
-                for hit in pattern.findall(line):
-                    if hit in PLACEHOLDERS:
-                        continue
-                    digest = hashlib.sha256(hit.encode()).hexdigest()
-                    if digest in secrets:
-                        findings.append(
-                            "%s:%d: the real %s from config.json"
-                            % (path, lineno, secrets[digest]))
-                    else:
-                        findings.append(
-                            "%s:%d: %s that is not a known placeholder (%s…)"
-                            % (path, lineno, label, hit[:6]))
+        text = _content(path, staged)
+        if text:
+            findings += _scan_text(path, text, secrets)
     return findings
 
 
 if __name__ == "__main__":
-    found = scan(staged="--staged" in sys.argv)
+    rev_range = None
+    if "--range" in sys.argv:
+        i = sys.argv.index("--range")
+        if i + 1 >= len(sys.argv):
+            print("scan-identity: --range needs a revision range", file=sys.stderr)
+            sys.exit(2)
+        rev_range = sys.argv[i + 1]
+
+    found = scan(staged="--staged" in sys.argv, rev_range=rev_range)
     if not found:
         sys.exit(0)
-    print("identity check FAILED — this must not be committed:\n", file=sys.stderr)
+    verb = "pushed" if rev_range else "committed"
+    print("identity check FAILED — this must not be %s:\n" % verb, file=sys.stderr)
     for line in found:
         print("  " + line, file=sys.stderr)
     print("\nReal values belong in ~/.config/hongyan/config.json, which is "

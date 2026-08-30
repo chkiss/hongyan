@@ -9,7 +9,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 hooks="$(git -C "$repo" rev-parse --git-path hooks)"
 
 mkdir -p "$hooks"
-for hook in pre-commit; do
+for hook in pre-commit pre-push; do
     src="$repo/scripts/$hook"
     dst="$hooks/$hook"
     if [ -e "$dst" ] && ! [ -L "$dst" ]; then

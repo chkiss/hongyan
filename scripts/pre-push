@@ -1,0 +1,48 @@
+#!/bin/bash
+# hongyan pre-push: identity never leaves this machine over the network.
+#
+# The commit hook only sees commits made through it. Three things get past it
+# and still reach GitHub: a commit made in another clone, a commit made with
+# --no-verify, and a rebase that lifts an old commit back onto the branch. A
+# secret added and deleted two commits later is also still in the history a
+# push carries, even though the tip tree is clean.
+#
+# So this scans the blobs the push actually introduces, not the branch as it
+# looks now. Refused pushes exit non-zero and git stops before contacting the
+# remote — nothing has left yet when the message prints.
+#
+# Installed by scripts/install-hooks.sh alongside pre-commit.
+set -u
+repo="$(git rev-parse --show-toplevel)"
+remote="${1:-origin}"
+scan="$repo/scripts/scan-identity.py"
+zero="0000000000000000000000000000000000000000"
+status=0
+
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+    # Branch deletion: nothing is being sent, nothing to scan.
+    [ "$local_sha" = "$zero" ] && continue
+
+    if [ "$remote_sha" = "$zero" ]; then
+        # New branch on the remote: everything on it that no other remote ref
+        # already has. Scanning from the root would flag history GitHub holds
+        # already and make the hook useless noise on a first push.
+        range="$local_sha --not --remotes=$remote"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    # Unquoted on purpose: $range is either one token or the --not form.
+    # shellcheck disable=SC2086
+    python3 "$scan" --range $range || status=1
+done
+
+if [ "$status" -ne 0 ]; then
+    echo "" >&2
+    echo "push refused — nothing was sent." >&2
+    echo "Rewrite the offending commits (git rebase -i) rather than adding a" >&2
+    echo "commit on top: the secret stays in history either way." >&2
+fi
+
+exit "$status"
