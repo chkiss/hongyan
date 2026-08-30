@@ -18,11 +18,29 @@ import sys
 # the socket in the runtime dir where it dies at boot.
 DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME")
                    or os.path.expanduser("~/.config"), "hongyan")
-_RUN = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
-        if os.environ.get("XDG_RUNTIME_DIR")
-        else os.path.join(os.environ.get("XDG_STATE_HOME")
-                          or os.path.expanduser("~/.local/state"),
-                          "hongyan", "run"))
+def _run_dir():
+    """Matches hongyan-lib.sh and hongyan_listener.py branch for branch.
+
+    cron has no session and so no XDG_RUNTIME_DIR. Falling straight through
+    to the state dir meant every cron-fired alert looked for the socket in a
+    directory the daemon has never used: the socket send failed on a missing
+    path, the direct send failed because the daemon holds the account lock,
+    and the watchdog logged "alert sent". Between 2026-08-29 and 08-30 that
+    silently swallowed 144 outage alerts, the daily bench digest, and the
+    recovery notice. Sending by hand always worked, which is exactly why it
+    went unnoticed.
+    """
+    if os.environ.get("XDG_RUNTIME_DIR"):
+        return os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
+    default = "/run/user/%d" % os.getuid()
+    if os.path.isdir(default):
+        return os.path.join(default, "hongyan")
+    return os.path.join(os.environ.get("XDG_STATE_HOME")
+                        or os.path.expanduser("~/.local/state"),
+                        "hongyan", "run")
+
+
+_RUN = _run_dir()
 SIGNAL_CLI = os.path.expanduser("~/.local/bin/signal-cli")
 
 try:
@@ -117,7 +135,15 @@ def main():
         return 0
     if via_cli(text):
         return 0
-    print("hongyan-send: both socket and direct send failed", file=sys.stderr)
+    # Name what was tried. The bare sentence gave a reader nothing to act
+    # on, and the one fact that would have solved it — the socket path was
+    # wrong — was the one fact it withheld.
+    print("hongyan-send: both socket and direct send failed "
+          "(socket %s: %s; direct: %s)"
+          % (SOCK, "present" if os.path.exists(SOCK) else "MISSING",
+             "no bot_number configured" if not bot_number()
+             else "signal-cli refused, daemon likely holds the account lock"),
+          file=sys.stderr)
     return 1
 
 

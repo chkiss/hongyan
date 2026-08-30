@@ -2209,12 +2209,19 @@ def deliver_deferred_images(client):
 # is provider "nous", model "tencent/hy3:free".
 # --------------------------------------------------------------------------
 
+# console_url is where a HUMAN goes when a channel needs one. A benched
+# model told the owner to "look at config.json", which is the one place the
+# answer is not: what the provider still serves lives on the provider's own
+# page, and an alert that names a chore without naming the door is a chore
+# with a search attached.
 DEFAULT_PROVIDERS = {
     "zen": {
         "api_base": "https://opencode.ai/zen/v1",
+        "console_url": "https://opencode.ai/zen",
     },
     "nous": {
         "api_base": "https://inference-api.nousresearch.com/v1",
+        "console_url": "https://portal.nousresearch.com",
         # Nous rejects an untagged request outright ("missing user tag").
         # The tags are attribution, not identity — nothing here names the
         # owner, and the ACI in particular never leaves this machine.
@@ -2259,6 +2266,17 @@ def split_model(entry):
 
 def provider_conf(name):
     return PROVIDERS.get(name) or PROVIDERS.get(DEFAULT_PROVIDER) or {}
+
+
+def console_link(model):
+    """'nous — https://…' for the endpoint this model came from, or "".
+
+    Empty for a provider with no page configured: an invented URL is worse
+    than none, because a dead link reads as an answer.
+    """
+    provider, _ = split_model(model)
+    url = (provider_conf(provider) or {}).get("console_url")
+    return "%s — %s" % (provider, url) if url else ""
 
 
 def api_key(provider=None):
@@ -2646,12 +2664,15 @@ def raise_action_item(model, err):
     for _, item in pending_items():
         if marker in item.get("text", ""):
             return
+    link = console_link(model)
     with open(QUEUE_FILE, "a") as fh:
         fh.write(json.dumps({
             "ts": time.time(),
-            "text": "%s — benched (%s). Look at config.json when you can; "
-                    "reply 'use %s' to put it back in service."
-                    % (marker, clip(err, 120), model),
+            "text": "%s — benched (%s). Reply 'use %s' to put it back in "
+                    "service, or 'swap %s <model>' to replace it.%s"
+                    % (marker, clip(err, 120), model, model,
+                       ("\nWhat the endpoint still serves: " + link)
+                       if link else ""),
             "kind": "action",
             "model": model,
             "done": False,
@@ -2702,17 +2723,26 @@ def note_model_gone(model, exc, extra="", force=False, roles=""):
 
     audit_fail("model_gone", "%s | %s" % (model, clip(text, 100)))
     roles = roles or configured_models().get(model) or "a"
+    link = console_link(model)
     try:
-        subprocess.run(
+        r = subprocess.run(
             [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                           "hongyan-send.py"),
              "The %s model (%s) is failing and looks gone or capped: %s\n"
              "It is benched until you look at it — the fallback took over for now. "
              "This is also waiting in your queue as an action item.\n\n"
-             "Put it back with 'use %s', or pick another in config.json.%s"
-             % (roles[0], model, clip(text, 120), model,
+             "Put it back with 'use %s', or replace it with 'swap %s <model>'.%s%s"
+             % (roles[0], model, clip(text, 120), model, model,
+                ("\nWhat the endpoint still serves: " + link) if link else "",
                 ("\n\n" + extra) if extra else "")],
             timeout=60, capture_output=True)
+        # An alert that failed to send is the failure that hides every other
+        # one, so it is never assumed to have worked.
+        if r.returncode != 0:
+            audit_fail("model_gone_alert",
+                       "%s | rc=%d %s" % (model, r.returncode,
+                                          clip((r.stderr or b"").decode(
+                                              "utf-8", "replace"), 120)))
     except Exception as exc2:  # noqa: BLE001
         audit_fail("model_gone_alert", str(exc2)[:100])
 

@@ -31,6 +31,21 @@ MODE="${1:---restart}"
 hongyan_dirs
 log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
 
+# Every alert goes through here, because "alert sent" used to be logged
+# whether or not anything was sent. 144 outage alerts failed in a row and the
+# log recorded all 144 as delivered; the owner learned about the outage from
+# nobody. A send that fails is itself news, and it says so in the log.
+alert() {
+    local body="$1" what="${2:-}"
+    if printf '%s' "$body" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
+            >> "$LOG" 2>&1; then
+        log "alert sent${what:+ ($what)}"
+        return 0
+    fi
+    log "alert NOT SENT — hongyan-send failed${what:+ ($what)}"
+    return 1
+}
+
 # Rotate here, at the top. It used to sit after the case statement, but the
 # common path — --restart succeeding, every ten minutes — exits first, so the
 # log only ever shrank on days something went wrong.
@@ -65,9 +80,8 @@ case "$MODE" in
             mins=$(( ( $(date +%s) - since ) / 60 ))
             log "recovered after ${mins}m down"
             if [ "$mins" -ge 15 ]; then
-                /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-                    "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
-                    >> "$LOG" 2>&1
+                alert "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
+                      "recovery"
             fi
             rm -f "$DOWN_SINCE"
         fi
@@ -87,9 +101,8 @@ case "$MODE" in
         if [ -f "$DOWN_SINCE" ]; then
             since="$(cat "$DOWN_SINCE" 2>/dev/null || echo 0)"
             mins=$(( ( $(date +%s) - since ) / 60 ))
-            [ "$mins" -ge 15 ] && /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-                "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
-                >> "$LOG" 2>&1
+            [ "$mins" -ge 15 ] && alert "I was down for about ${mins} min and have just come back. Anything you sent in that window was dropped — resend it if it still matters." \
+                "recovery"
             rm -f "$DOWN_SINCE"
         fi
         exit 0
@@ -105,10 +118,8 @@ case "$MODE" in
     # Alert on the second failure (~20 min down), then hourly, so a long
     # outage nags without flooding.
     if [ "$n" -eq 2 ] || { [ "$n" -gt 2 ] && [ $(( n % 6 )) -eq 0 ]; }; then
-        /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-            "Signal listener is DOWN on hetz — $n restart attempts have failed. Commands are not being processed." \
-            >> "$LOG" 2>&1
-        log "alert sent (n=$n)"
+        alert "Signal listener is DOWN on hetz — $n restart attempts have failed. Commands are not being processed." \
+              "n=$n"
     fi
     ;;
 
@@ -162,8 +173,8 @@ for m in sorted(chains & set(state)):
     print("%s — %s (%s)" % (m, b.get("why", "")[:60], when))
 ' 2>>"$LOG")"
     if [ -n "$bench_report" ]; then
-        printf 'Benched models on this box:\n%s' "$bench_report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
-        log "daily bench digest: sent"
+        alert "$(printf 'Benched models on this box:\n%s' "$bench_report")" \
+              "daily bench digest"
     else
         log "daily bench digest: all chain models clear"
     fi
@@ -184,18 +195,15 @@ for m in sorted(chains & set(state)):
 
     # Still broken. Alert. The direct-send fallback works precisely because
     # the daemon is down, so the account lock is free.
-    /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" \
-        "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
-        >> "$LOG" 2>&1
-    log "daily: alert sent"
+    alert "Signal listener DOWN on hetz and could not be restarted: ${problems[*]}. Commands are not being processed." \
+          "daily"
     ;;
 
 --models)
     # Also runnable on its own, for checking by hand after changing a model.
     report="$(/usr/bin/python3 "$HOME/.local/bin/hongyan_listener.py" --check-models 2>>"$LOG")"
     if [ -n "$report" ]; then
-        printf '%s' "$report" | /usr/bin/python3 "$HOME/.local/bin/hongyan-send.py" >> "$LOG" 2>&1
-        log "model check: DEPENDENCY MISSING, reported"
+        alert "$report" "model check: DEPENDENCY MISSING"
     else
         log "model check: ok"
     fi

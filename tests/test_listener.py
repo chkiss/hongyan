@@ -152,6 +152,63 @@ check("range leaves the neighbours alone",
 m.t2_done("all")
 
 
+# ------------------------------------------------- alerts actually send ---
+section("the alert path agrees with cron")
+
+# The failure this exists to prevent: hongyan-send.py resolved the socket
+# from XDG_RUNTIME_DIR, which cron does not set. Every cron-fired alert —
+# 144 outage warnings, the daily bench digest, the recovery notice — died on
+# a missing socket path while the log said "alert sent". Sending by hand
+# worked the whole time, which is why nobody noticed.
+_probe = (
+    "import importlib.util as u, os, sys;"
+    "s = u.spec_from_file_location('snd', sys.argv[1]);"
+    "mm = u.module_from_spec(s); s.loader.exec_module(mm);"
+    "print(mm.SOCK)"
+)
+_send_py = os.path.join(ROOT, "hongyan-send.py")
+_env = dict(os.environ)
+_env.pop("XDG_RUNTIME_DIR", None)
+_cron_sock = subprocess.run([sys.executable, "-c", _probe, _send_py],
+                            capture_output=True, text=True, env=_env).stdout.strip()
+_env["XDG_RUNTIME_DIR"] = "/run/user/%d" % os.getuid()
+_hand_sock = subprocess.run([sys.executable, "-c", _probe, _send_py],
+                            capture_output=True, text=True, env=_env).stdout.strip()
+if os.path.isdir("/run/user/%d" % os.getuid()):
+    check("cron and a hand-start pick the same socket", _cron_sock, _hand_sock)
+check("the alert socket is the listener's socket", _cron_sock,
+      os.path.join(m.RUN_DIR, "socket"))
+
+# The watchdog must never log a delivery it did not get.
+_wd = open(os.path.join(ROOT, "hongyan-watchdog")).read()
+check("every alert goes through the checked helper",
+      _wd.count('hongyan-send.py'), 1)
+check("a failed send is logged as failed", "alert NOT SENT" in _wd, True)
+
+
+# ------------------------------------------- a benched channel has a door ---
+section("a channel that needs a human names the door")
+
+check("the link names the provider that failed",
+      m.console_link("nous:tencent/hy3:free"),
+      "nous — https://portal.nousresearch.com")
+check("a bare id resolves to the default provider",
+      m.console_link("big-pickle"), "zen — https://opencode.ai/zen")
+# An invented URL is worse than none: a dead link reads as an answer.
+m.PROVIDERS["nolink"] = {"api_base": "https://example.invalid/v1"}
+check("no page configured means no link", m.console_link("nolink:some-model"), "")
+del m.PROVIDERS["nolink"]
+
+open(m.QUEUE_FILE, "w").close()
+m.raise_action_item("nous:tencent/hy3:free", "HTTP Error 401: Unauthorized")
+_item = m.load_queue()[0]["text"]
+check("the action item carries the link",
+      "https://portal.nousresearch.com" in _item, True)
+check("and the command that fixes it", "swap nous:tencent/hy3:free" in _item, True)
+check("it no longer sends you to config.json", "config.json" in _item, False)
+open(m.QUEUE_FILE, "w").close()
+
+
 # ------------------------------------------------- running a queue item ---
 section("a number after a listing runs that item")
 
