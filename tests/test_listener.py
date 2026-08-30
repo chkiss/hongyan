@@ -152,6 +152,69 @@ check("range leaves the neighbours alone",
 m.t2_done("all")
 
 
+# ------------------------------------------------- running a queue item ---
+section("a number after a listing runs that item")
+
+open(m.QUEUE_FILE, "w").close()
+m.queue_note("what is the capital of Peru")
+m.queue_note("remind me to call the vet")
+m.queue_note("why does this sentence need a particle")
+
+# A number means nothing until a list has been printed: "4" typed in the
+# middle of another conversation is still just a message.
+try:
+    os.remove(m.QUEUE_VIEW_FILE)
+except OSError:
+    pass
+check("bare number is inert with no listing", m.queue_reference("2"), None)
+check("'run 2' is explicit and always counts", m.queue_reference("run 2"), 2)
+
+listing = m.cmd_queue()
+check("listing offers running by number", "number to run that one" in listing, True)
+check("bare number lands after a listing", m.queue_reference("2"), 2)
+check("prose is not a queue reference", m.queue_reference("2 or 3 hours?"), None)
+
+# The bug this exists to prevent: replying "3" queued the digit "3" as a new
+# note and answered "queued — nothing ran", leaving item 3 untouched.
+_real_answer = m.answer
+m.answer = lambda text, *a, **k: "ANSWERED: " + text
+before = len(m.load_queue())
+reply = m.dispatch("3")
+check("the item is answered, not requeued", reply.startswith("ANSWERED: why does"), True)
+check("nothing new was queued", len(m.load_queue()), before)
+check("the item it ran is cleared",
+      any("particle" in i["text"] for _, i in m.pending_items()), False)
+
+# Numbers point at the list the owner is looking at, not at a recomputed one:
+# item 1 must still be item 1 now that 3 is gone.
+check("the printed numbering survives a clear",
+      m.queue_item_at(1)[0]["text"], "what is the capital of Peru")
+
+# A reminder has nothing to run, and says so instead of pretending.
+check("a reminder explains itself",
+      "nothing to run" in m.dispatch("run 2"), True)
+
+# A failure names its cause and leaves the item in the queue.
+m.answer = lambda text, *a, **k: None
+m.set_block_reason("every answering model is benched right now")
+reply = m.dispatch("run 1")
+check("failure gives the reason", "benched" in reply, True)
+check("failure keeps the item", "still in the queue" in reply, True)
+check("the item really is still open",
+      any("Peru" in i["text"] for _, i in m.pending_items()), True)
+
+# And the plain queue path says why nothing ran, too.
+m.set_block_reason("every answering model is benched right now")
+check("queue_note carries the reason", "benched" in m.queue_note("some question"), True)
+
+check("out of range is refused, not queued",
+      m.dispatch("run 99").startswith("no open item"), True)
+m.answer = _real_answer
+m.t2_done("all")
+check("running against an empty queue explains itself",
+      "nothing at 1" in m.dispatch("run 1"), True)
+
+
 # ------------------------------------------------------- step deduplication ---
 section("near-duplicate steps")
 
@@ -1523,8 +1586,22 @@ check("state is not in the config dir",
       m.STATE_DIR, os.path.join(_TMP, ".local", "state", "hongyan"))
 check("the audit log follows the state dir",
       m.AUDIT_FILE.startswith(m.STATE_DIR), True)
-check("no runtime dir means state/run, never a missing path",
-      m.RUN_DIR, os.path.join(_TMP, ".local", "state", "hongyan", "run"))
+# With XDG_RUNTIME_DIR unset — which is what cron gives you — the runtime
+# dir must still be the one an interactive shell picks, or the watchdog reads
+# a healthy listener as dead. It fell through to state/run until 2026-08-30
+# and spent 24h "restarting" a process that was up the whole time.
+_expected_run = ("/run/user/%d/hongyan" % os.getuid()
+                 if os.path.isdir("/run/user/%d" % os.getuid())
+                 else os.path.join(_TMP, ".local", "state", "hongyan", "run"))
+check("no runtime dir still agrees with the session default",
+      m.RUN_DIR, _expected_run)
+check("the shell library picks the same directory",
+      subprocess.run(
+          ["bash", "-c",
+           'unset XDG_RUNTIME_DIR; . "%s"; echo "$HY_RUN_DIR"'
+           % os.path.join(ROOT, "hongyan-lib.sh")],
+          capture_output=True, text=True).stdout.strip(),
+      _expected_run)
 check("the socket is a runtime path",
       m.SOCKET_PATH, os.path.join(m.RUN_DIR, "socket"))
 

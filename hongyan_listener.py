@@ -74,9 +74,22 @@ def _xdg(var, default, app="hongyan"):
 CONFIG_DIR = _xdg("XDG_CONFIG_HOME", "~/.config")
 STATE_DIR = _xdg("XDG_STATE_HOME", "~/.local/state")
 DATA_DIR = _xdg("XDG_DATA_HOME", "~/.local/share")
-RUN_DIR = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
-           if os.environ.get("XDG_RUNTIME_DIR")
-           else os.path.join(STATE_DIR, "run"))
+def _run_dir():
+    """Matches hongyan-lib.sh branch for branch — see the note there.
+
+    A process started from cron has no XDG_RUNTIME_DIR; one started by hand
+    does. If the two disagree they use two different sockets and two
+    different pid files, and each reads the other as dead.
+    """
+    if os.environ.get("XDG_RUNTIME_DIR"):
+        return os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
+    default = "/run/user/%d" % os.getuid()
+    if os.path.isdir(default):
+        return os.path.join(default, "hongyan")
+    return os.path.join(STATE_DIR, "run")
+
+
+RUN_DIR = _run_dir()
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 SOCKET_PATH = os.path.join(RUN_DIR, "socket")
 
@@ -111,6 +124,10 @@ def state_path(name):
 
 
 QUEUE_FILE = state_path("queue.jsonl")
+# The numbering the owner is currently looking at, so a bare "4" in reply to
+# a listing means that row and not whatever has since slid into slot 4.
+QUEUE_VIEW_FILE = state_path("queue_view.json")
+QUEUE_VIEW_TTL = 3600
 AUDIT_FILE = state_path("audit.log")
 SEEN_FILE = state_path("seen.json")
 KILL_FILE = state_path("disabled")
@@ -756,6 +773,21 @@ REMINDER_RE = re.compile(
     r"^\s*(remind me\b|don'?t let me forget\b|remember to\b|note to self\b)", re.I)
 
 
+# Why the answer path came back empty. answer() returns None for several
+# different reasons and the caller could not tell them apart, so every one of
+# them reached the owner as the same "queued — nothing ran".
+_BLOCK_REASON = ""
+
+
+def set_block_reason(why):
+    global _BLOCK_REASON
+    _BLOCK_REASON = why or ""
+
+
+def block_reason():
+    return _BLOCK_REASON or "the answer path came back empty without saying why"
+
+
 def load_queue():
     try:
         with open(QUEUE_FILE) as fh:
@@ -806,7 +838,9 @@ def format_queue(pending, header):
             lines.append("%d. %s%s (%s)" % (n, item["text"][:100], due,
                                             _age_label(item.get("ts"))))
     lines.append("")
-    lines.append("reply 'done <number>' to clear one, or 'done all'.")
+    lines.append("reply with a number to run that one, "
+                 "'done <number>' to clear it, or 'done all'.")
+    save_queue_view(pending)
     return "\n".join(lines)
 
 
@@ -826,6 +860,117 @@ def cmd_queue():
     if not pending:
         return "queue empty"
     return format_queue(pending, "%d item(s) open:" % len(pending))
+
+
+def save_queue_view(pending):
+    """Remember which item each printed number pointed at.
+
+    Positions are stored by the item's own timestamp, not by index: clearing
+    one row renumbers the rest, and resolving a number against a freshly
+    computed list would then point at the wrong item — the same renumbering
+    bug t2_done was already written around.
+    """
+    try:
+        with open(QUEUE_VIEW_FILE, "w") as fh:
+            json.dump({"at": time.time(),
+                       "map": {str(n): i.get("ts") for n, i in pending}}, fh)
+    except OSError:
+        pass
+
+
+def load_queue_view():
+    """The last printed numbering, or {} if there is none or it is stale."""
+    try:
+        with open(QUEUE_VIEW_FILE) as fh:
+            view = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if time.time() - (view.get("at") or 0) > QUEUE_VIEW_TTL:
+        return {}
+    return view.get("map") or {}
+
+
+QUEUE_REF_RE = re.compile(r"^\s*(?:(run|do|queue)\s+)?#?(\d{1,3})\s*[.!]?\s*$",
+                          re.I)
+
+
+def queue_reference(text):
+    """The queue position this message refers to, or None.
+
+    A bare number counts only while a listing is fresh, so a "4" typed in the
+    middle of some other conversation is still just a message. 'run 4' says
+    so out loud and always counts.
+    """
+    m = QUEUE_REF_RE.match(text or "")
+    if not m:
+        return None
+    verb = (m.group(1) or "").lower()
+    if not verb and not load_queue_view():
+        return None
+    return int(m.group(2))
+
+
+def queue_item_at(pos):
+    """(item, "") for the open row the owner means, else (None, why)."""
+    pending = pending_items()
+    if not pending:
+        return None, "queue empty — there is nothing at %d to run." % pos
+    ts = load_queue_view().get(str(pos))
+    if ts is not None:
+        for _, item in pending:
+            if item.get("ts") == ts:
+                return item, ""
+        return None, ("item %d has been cleared since that list — say 'queue' "
+                      "for the current one." % pos)
+    for n, item in pending:
+        if n == pos:
+            return item, ""
+    return None, ("no open item %d — there %s %d." % (
+        pos, "is" if len(pending) == 1 else "are", len(pending)))
+
+
+def mark_item_done(item):
+    items = load_queue()
+    for row in items:
+        if row.get("ts") == item.get("ts") and not row.get("done"):
+            row["done"] = True
+            break
+    save_queue(items)
+
+
+def run_queue_item(pos, notify=None, sources_out=None):
+    """Answer a queued row now, and clear it if an answer arrives.
+
+    Replying "4" to a listing used to fall all the way through to the
+    freetext path: it queued the digit "4" as a brand new note and said
+    "queued — nothing ran", while the item the owner was pointing at sat
+    there untouched. A number is a reference, not a message. When it cannot
+    be run the row stays open and the reply says WHY — a bare "nothing ran"
+    is indistinguishable from being ignored.
+    """
+    item, why = queue_item_at(pos)
+    if item is None:
+        audit_fail("queue_run", "%d | %s" % (pos, clip(why, 80)))
+        return why
+    text = item.get("text") or ""
+    kind = item.get("kind")
+    if kind == "action":
+        audit("queue_run", "%d | action item, nothing to run" % pos)
+        return ("%d isn't a question I can run — it's a decision waiting on "
+                "you:\n%s" % (pos, clip(text, 300)))
+    if kind == "reminder":
+        audit("queue_run", "%d | reminder, nothing to run" % pos)
+        return ("%d is a reminder, so there's nothing to run:\n%s\n\n"
+                "Clear it with 'done %d'." % (pos, clip(text, 300), pos))
+    audit("queue_run", "%d | %s" % (pos, clip(text)))
+    ans = answer(text, notify, "", sources_out)
+    if not ans:
+        audit_fail("queue_run_failed", "%d | %s" % (pos, clip(block_reason(), 90)))
+        return ("Couldn't run %d (%s) — %s. It's still in the queue."
+                % (pos, clip(text, 80), block_reason()))
+    mark_item_done(item)
+    audit("queue_done", "%d (ran)" % pos)
+    return ans
 
 
 def parse_positions(arg, count):
@@ -2374,6 +2519,15 @@ def model_call(role, messages, max_tokens=None, effort=None):
     if failures:
         audit_fail("chain_exhausted", "%s | %s" % (
             role, "; ".join("%s: %s" % (m, e) for m, e in failures)[:200]))
+        set_block_reason("every %s model failed (%s)" % (
+            role, "; ".join("%s: %s" % (m.split("/")[-1], e)
+                            for m, e in failures)[:150]))
+    else:
+        # Nothing was even tried: the whole chain is benched. This path used
+        # to return None without a log line or a reason at all.
+        audit_fail("chain_benched", role)
+        set_block_reason("every %s model is benched right now — 'queue' shows "
+                         "the channel-down items" % role)
     return None
 
 
@@ -4393,6 +4547,7 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None,
     # A quoted reply bypasses routing entirely: the user pointed at the thread
     # by hand, which is the whole point of the override, so the classifier gets
     # no say in which turn is used.
+    set_block_reason("")  # this call's own reason, not the last call's
     if forced_turn is not None:
         turns, standalone = [forced_turn], rewrite_against(forced_turn, text)
         routed_meta, routed_effort = None, None
@@ -4444,6 +4599,8 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None,
             "are exact commands the user types themselves: restart mandoremi, restart "
             "syncthing, rerun <job>, note <text>, mute, kill.")
     if is_task:
+        set_block_reason("that's a task for Claude, not a question I can answer "
+                         "from here")
         return None  # falls through to the queue
 
     if image_desc:
@@ -4492,6 +4649,8 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None,
     out = model_call("answering", messages, effort=effort)
 
     if not out or out.strip().upper().startswith("NOANSWER"):
+        if out:
+            set_block_reason("the model declined to answer that one")
         return None
 
     out = plain_text(out)
@@ -4546,7 +4705,7 @@ def parse_due(text, now=None):
     return None
 
 
-def queue_note(text):
+def queue_note(text, reason=None):
     kind = "reminder" if REMINDER_RE.match(text or "") else "freetext"
     entry = {"ts": time.time(), "text": text, "kind": kind,
              "done": False}
@@ -4561,7 +4720,10 @@ def queue_note(text):
         # would ever resurface, and nothing did. Nothing arrives unasked: it
         # comes back as an offer attached to a message you sent.
         return "noted — I'll bring it up next time you message me until you clear it."
-    return "queued — nothing ran. Say 'queue' anytime, or I'll mention it next time we talk."
+    # The reason matters as much as the fact: "nothing ran" alone reads as
+    # being ignored, and hid a fully benched model chain for a whole day.
+    return ("queued — nothing ran (%s). Say 'queue' anytime, or I'll mention it "
+            "next time we talk." % (reason or block_reason()))
 
 
 def dispatch(text, notify=None, attachments=None, sources_out=None,
@@ -4621,6 +4783,9 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
             attachments = [a for a in attachments if a not in audio]
             if not attachments:
                 # Pure voice note: from here it is just a text message.
+                pos = queue_reference(text)
+                if pos is not None:
+                    return run_queue_item(pos, notify, sources_out)
                 cmd, arg = match_exact(text)
                 if cmd:
                     audit("exact", "%s | %s" % (cmd, clip(text)))
@@ -4631,8 +4796,9 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
                     audit("answered", clip(text))
                     return ans
                 audit("queued", clip(text))
-                return ("I drew a blank on that one — it's queued, and I'll "
-                        "raise it next time we talk.")
+                queue_note(text)
+                return ("I couldn't answer that one — %s. It's queued, and "
+                        "I'll raise it next time we talk." % block_reason())
 
     # Documents before images: PDFs and text files are read locally (no
     # model needed for extraction) and handed to the answer as context.
@@ -4720,6 +4886,13 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
                       forced_turn=forced_turn,
                       doc_context=doc_context) or queue_note(text)
 
+    # Before the command matcher, because 'queue 4' otherwise matched the
+    # bare 'queue' command and reprinted the list the owner had just read.
+    pos = queue_reference(text)
+    if pos is not None:
+        note_source("server:queue")
+        return run_queue_item(pos, notify, sources_out)
+
     cmd, arg = match_exact(text)
     if cmd:
         audit("exact", "%s | %s" % (cmd, clip(text)))
@@ -4748,7 +4921,7 @@ def dispatch(text, notify=None, attachments=None, sources_out=None,
         return ans
 
     audit("queued", clip(text))
-    return queue_note(text)
+    return queue_note(text, block_reason())
 
 
 # --------------------------------------------------------------------------

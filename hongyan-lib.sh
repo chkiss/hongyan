@@ -12,6 +12,16 @@ HY_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hongyan"
 HY_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/hongyan"
 if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
     HY_RUN_DIR="$XDG_RUNTIME_DIR/hongyan"
+elif [ -d "/run/user/$(id -u)" ]; then
+    # cron has no session, so XDG_RUNTIME_DIR is unset there while an
+    # interactive shell has it. Falling straight through to the state dir
+    # split the two apart the moment the runtime files moved: supervise
+    # exports the default and writes its pids under /run/user, the watchdog
+    # did not and looked for them under state. It read a listener that had
+    # been up for a day as dead, and spent 24h and 144 "restarts" fighting
+    # a process that was answering messages the whole time. The default
+    # belongs here, once, where both of them read it.
+    HY_RUN_DIR="/run/user/$(id -u)/hongyan"
 else
     HY_RUN_DIR="$HY_STATE_DIR/run"
 fi
