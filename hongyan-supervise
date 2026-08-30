@@ -30,6 +30,15 @@ hongyan_dirs
 
 if ! hongyan_alive "$DAEMON_PID" "daemon"; then
     rm -f "$SOCK"
+    # signal-cli is a native-image binary that unpacks a ~174 MB libsignal
+    # bundle into /tmp at startup and never removes it. Recycle restarts it
+    # four times a day, so /tmp collected 48 orphans and filled the root
+    # filesystem on 2026-08-30. TMPDIR does not move it — the native image
+    # pins java.io.tmpdir to /tmp — so reap instead of redirect. Here is the
+    # one moment that is provably safe: we are in the "daemon not alive"
+    # branch, so no signal-cli process holds any of these, and the copy the
+    # next line unpacks is created after the delete.
+    rm -rf /tmp/libsignal*
     nohup "$HOME/.local/bin/signal-cli" --log-file "$DIR/cli.log" daemon \
         --socket "$SOCK" --receive-mode on-connection --no-receive-stdout \
         >> "$LOG" 2>&1 &
