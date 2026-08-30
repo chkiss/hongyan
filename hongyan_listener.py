@@ -837,6 +837,13 @@ def format_queue(pending, header):
                        else " [due %s]" % time.strftime("%H:%M", time.localtime(due_ts)))
             lines.append("%d. %s%s (%s)" % (n, item["text"][:100], due,
                                             _age_label(item.get("ts"))))
+            # The door on its own line. An action item's text is truncated at
+            # 100 characters, so a link tacked onto the end of it was present
+            # in the queue and invisible in the listing — which is the only
+            # place the owner reads it.
+            link = console_link(item.get("model")) if item.get("model") else ""
+            if link:
+                lines.append("   -> %s" % link)
     lines.append("")
     lines.append("reply with a number to run that one, "
                  "'done <number>' to clear it, or 'done all'.")
