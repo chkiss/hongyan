@@ -1,0 +1,40 @@
+#!/bin/bash
+# Send a Signal message to the owner from a machine that is NOT the server.
+# Usage: hongyan-me-relay "message text"   |   echo "text" | hongyan-me-relay
+#
+# The counterpart to hongyan-me, which runs ON the server and talks to the
+# local daemon. This one is a thin relay over ssh, for the review host.
+#
+# The Signal account lives on exactly one machine. There is deliberately no
+# signal-cli account state on a relay host: running one account from two hosts
+# corrupts Signal sessions.
+#
+# The server runs a signal-cli daemon holding an exclusive lock on the account,
+# so the send must go through its JSON-RPC socket via hongyan-send.py, not a
+# bare `signal-cli send`.
+set -euo pipefail
+
+# Which server to relay through. Same resolution the monthly reviewer uses, so
+# a two-device install configures the target once. No default host on purpose:
+# a relay pointed at whatever box the author used would message a stranger.
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/hongyan"
+HOST="${HONGYAN_SSH:-}"
+if [ -z "$HOST" ] && [ -r "$STATE_DIR/review-target" ]; then
+    HOST="$(tr -d '[:space:]' < "$STATE_DIR/review-target")"
+fi
+[ -n "$HOST" ] || {
+    echo "hongyan-me-relay: no server configured." >&2
+    echo "Set HONGYAN_SSH, or write the SSH target to $STATE_DIR/review-target" >&2
+    exit 1
+}
+
+if [ "$#" -gt 0 ]; then
+    MSG="$*"
+else
+    MSG="$(cat)"
+fi
+
+[ -n "$MSG" ] || { echo "hongyan-me-relay: empty message" >&2; exit 1; }
+
+printf '%s' "$MSG" | ssh -o ConnectTimeout=20 "$HOST" \
+    '/usr/bin/python3 ~/.local/bin/hongyan-send.py'

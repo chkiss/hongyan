@@ -23,7 +23,7 @@ STATE_FILES=(audit.log audit.log.1 cli.log daemon.log listener.log watchdog.log
              offers.json usage.json roster.json model_state.json
              model_gone.json nxdomain.json onboarding.json pending_images.json
              heartbeat memory.md muted-until disabled restart_fails down_since
-             monthly-review-brief.md)
+             monthly-review-brief.md review-target review.log)
 # RUNTIME: recreated on demand, correct to lose at boot.
 RUN_FILES=(socket daemon.pid listener.pid update.lock recycle.lock)
 # DATA: the speech-to-text weights.
@@ -130,12 +130,19 @@ and it is now safe to copy or back up without carrying message content along.
 EOF
 fi
 
-"$HOME/.local/bin/hongyan-supervise" >/dev/null 2>&1
-sleep 8
-if [ -S "$HY_RUN_DIR/socket" ]; then
-    say "back up: socket at $HY_RUN_DIR/socket"
+# A review host has no server on it: no supervise, no socket, nothing to
+# bring back. Warning it about a missing socket would be warning it about
+# something that was never supposed to exist.
+if [ -x "$HOME/.local/bin/hongyan-supervise" ]; then
+    "$HOME/.local/bin/hongyan-supervise" >/dev/null 2>&1
+    sleep 8
+    if [ -S "$HY_RUN_DIR/socket" ]; then
+        say "back up: socket at $HY_RUN_DIR/socket"
+    else
+        say "WARNING: no socket at $HY_RUN_DIR/socket — check $HY_STATE_DIR/daemon.log"
+    fi
 else
-    say "WARNING: no socket at $HY_RUN_DIR/socket — check $HY_STATE_DIR/daemon.log"
+    say "no hongyan-supervise here — review-host layout, nothing to restart"
 fi
 echo
 echo "still in the config dir:"
