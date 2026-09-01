@@ -1,5 +1,24 @@
 #!/bin/bash
-# signal-recycle — periodic fresh websocket for the signal-cli daemon.
+# signal-recycle — fresh websocket for the signal-cli daemon, on demand.
+#
+# NOT SCHEDULED (2026-09-02). Run it by hand when you want a known-fresh
+# daemon; nothing runs it periodically any more, and the reason is that the
+# blind restart was not neutral — it was the thing breaking the daemon.
+#
+# The daemon it started came up accepting one client and then serving no
+# further connections: the listener attached, the next probe was never
+# answered. flap-guard would find that a few minutes later, correctly
+# diagnose a silent half-open, and restart it into a working daemon. The
+# listener log shows the pair — a recycle at :37 and a repair at :38 — ten
+# times out of ten across the logged history, and the periodic
+# "🩺 signal daemon recycled" messages were that repair reporting itself.
+#
+# So the "no daemon runs indefinitely on unverified state" property was being
+# bought by manufacturing the exact state it was meant to prevent. What
+# verifies the daemon is signal-flap-guard's functional checks, which run
+# every 5 minutes and restart only on evidence. If this is ever put back on a
+# timer, it must probe its own restart and heal it before reporting, or the
+# repair loop comes back with it.
 #
 # Second layer after signal-flap-guard: even without a flap burst, a daemon
 # that has been up a long time is running on connection state nobody has
