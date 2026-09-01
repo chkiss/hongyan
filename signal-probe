@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""signal-probe — functional health probe for the signal-cli daemon.
+
+Opens the JSON-RPC socket and asks getUserStatus for the owner number: a
+question only Signal's servers can answer. A half-open websocket (ESTAB in
+ss, dead in reality — the 2026-08-23 silent failure mode) hangs here and
+fails the probe, even though process checks and connection counts look fine.
+Exit 0 = server roundtrip succeeded; exit 1 = no timely answer.
+"""
+import json
+import os
+import socket
+import sys
+import time
+from pathlib import Path
+
+_CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                       or str(Path.home() / ".config"), "hongyan")
+_RUN = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
+        if os.environ.get("XDG_RUNTIME_DIR")
+        else os.path.join(os.environ.get("XDG_STATE_HOME")
+                          or str(Path.home() / ".local/state"), "hongyan", "run"))
+
+CFG = json.loads(Path(_CONFIG).joinpath("config.json").read_text())
+# The socket is derived, not configured — see the XDG note in the listener.
+SOCK = os.path.expanduser(CFG.get("socket") or os.path.join(_RUN, "socket"))
+OWNER = CFG["owner_number"]
+TIMEOUT = 12
+
+req = {"jsonrpc": "2.0", "id": "probe", "method": "getUserStatus",
+       "params": {"recipient": OWNER}}
+
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(TIMEOUT)
+    s.connect(SOCK)
+    s.sendall((json.dumps(req) + "\n").encode())
+    buf = b""
+    deadline = time.time() + TIMEOUT
+    while time.time() < deadline:
+        try:
+            chunk = s.recv(4096)
+        except socket.timeout:
+            break
+        if not chunk:
+            break
+        buf += chunk
+        for line in buf.split(b"\n"):
+            if not line.strip():
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("id") == "probe":
+                sys.exit(0 if "result" in msg else 1)
+    sys.exit(1)
+except OSError:
+    sys.exit(1)

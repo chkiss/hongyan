@@ -1,0 +1,42 @@
+#!/bin/bash
+# Weekly Signal account keep-alive. Runs unattended from cron — no Claude involved.
+# The Signal protocol expects a registered account to receive regularly; a long
+# send-only silence can degrade the account. This exercises both paths.
+#
+# This account lives ONLY on this host. Never run signal-cli against a copy of
+# ~/.local/share/signal-cli on another machine — concurrent use corrupts sessions.
+set -uo pipefail
+
+BOT=$(python3 -c 'import json, os, pathlib
+p = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or str(pathlib.Path.home() / ".config")) / "hongyan" / "config.json"
+print(json.loads(p.read_text())["bot_number"])')
+SIGNAL_CLI="$HOME/.local/bin/signal-cli"
+LOG="$HOME/.local/share/signal-cli/keepalive.log"
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+{
+    echo "[$(ts)] keepalive start"
+
+    # rc must be captured before anything else runs: the $(ts) command
+    # substitution in the message itself resets $?, so "(exit $?)" inline
+    # would report the exit status of `date` — always 0 — and every failure
+    # would be logged as a success with a zero code.
+    if "$SIGNAL_CLI" -a "$BOT" receive --timeout 15 >/dev/null 2>&1; then
+        echo "[$(ts)] receive ok"
+    else
+        rc=$?
+        echo "[$(ts)] receive FAILED (exit $rc)"
+    fi
+
+    if "$SIGNAL_CLI" -a "$BOT" send --note-to-self -m "keepalive $(ts)" >/dev/null 2>&1; then
+        echo "[$(ts)] note-to-self ok"
+    else
+        rc=$?
+        echo "[$(ts)] note-to-self FAILED (exit $rc)"
+    fi
+} >> "$LOG" 2>&1
+
+if [ -f "$LOG" ] && [ "$(wc -l < "$LOG")" -gt 500 ]; then
+    tail -n 200 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+fi

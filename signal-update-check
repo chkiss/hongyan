@@ -1,0 +1,26 @@
+#!/bin/bash
+# signal-update-check — weekly check whether a signal-cli release newer than
+# the installed one exists. Silent when current; one Signal ping when a new
+# version ships, then quiet until the version changes again.
+set -u
+STATE="$HOME/.cache/signal-update-check"
+mkdir -p "$STATE"
+exec 9>"$STATE/.lock" && flock -n 9 || exit 0
+
+SEND="$HOME/.local/bin/signal-send.py"
+# `signal-cli --version` prints "signal-cli 0.14.7" — the bare number is the
+# last field. Comparing the whole line against a bare tag never matches, which
+# would announce a "new release" on every run whose own text shows the same
+# version as installed.
+INSTALLED=$(~/.local/bin/signal-cli --version 2>/dev/null | awk 'NR==1{print $NF}')
+[ -n "$INSTALLED" ] || exit 1
+
+# Strip only the leading v: `tr -d v` would also eat any v inside the tag.
+LATEST=$(curl -s --max-time 15 https://api.github.com/repos/AsamK/signal-cli/releases/latest \
+    | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
+[ -n "$LATEST" ] || exit 0   # API hiccup — stay quiet, retry next week
+
+if [ "$LATEST" != "$INSTALLED" ] && ! grep -qs "^$LATEST$" "$STATE/notified"; then
+    /usr/bin/python3 "$SEND" "🤖 signal-cli $LATEST released (installed: $INSTALLED). Upgrade checklist: snapshot ~/.local/share/signal-cli, keep old binary, read changelog breaking-changes, test one inbound text after." >/dev/null 2>&1 \
+        && echo "$LATEST" >> "$STATE/notified"
+fi

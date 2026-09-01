@@ -1,0 +1,83 @@
+#!/bin/bash
+# signal-recycle — periodic fresh websocket for the signal-cli daemon.
+#
+# Second layer after signal-flap-guard: even without a flap burst, a daemon
+# that has been up a long time is running on connection state nobody has
+# verified. Silent unless broken — a healthy recycle must not put words on
+# the wire.
+#
+# CADENCE (2026-08-29): every 6 hours, not hourly. Hourly was the reflex after
+# the 2026-08-23/24 incident and it never earned its keep: in the five days it
+# ran, flap-guard's functional checks (*/5, three real signatures) fired zero
+# times, while the blind restart cost 24 process kills a day, threw away every
+# in-memory cache each hour, and raced the */10 watchdog into the 5-second gap
+# where the socket does not exist — which is every FAIL:socket_connect_failed
+# in the audit log. Six hours keeps the "no daemon runs indefinitely on
+# unverified state" property at a quarter of the damage.
+#
+# Two guards make it cheaper still:
+#   MIN_AGE      a daemon younger than 5h was just started by something else
+#                (flap-guard, the watchdog, an update) — leave it alone.
+#   QUIET_FOR    never cut a conversation off mid-answer.
+set -u
+
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+for _lib in "$_hy_dir/hongyan-lib.sh" "$HOME/programoj/hongyan/hongyan-lib.sh" "$HOME/.local/bin/hongyan-lib.sh"; do
+    [ -f "$_lib" ] && { . "$_lib"; break; }
+done
+: "${HY_RUN_DIR:?hongyan-lib.sh not found}"
+
+DIR="$HY_STATE_DIR"
+SEND="$HOME/.local/bin/signal-send.py"
+MIN_AGE=18000   # 5h — below this the daemon is already fresh
+QUIET_FOR=180   # seconds of no listener activity required before recycling
+
+exec 9>"$HY_RUN_DIR/recycle.lock" && flock -n 9 || exit 0
+
+D=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+
+# Fresh enough already?
+if [ -n "$D" ] && [ -d "/proc/$D" ]; then
+    STARTED=$(stat -c %Y "/proc/$D" 2>/dev/null || echo 0)
+    AGE=$(( $(date +%s) - STARTED ))
+    [ "$AGE" -lt "$MIN_AGE" ] && exit 0
+fi
+
+# Busy right now? The audit log's own restart bookkeeping does not count as
+# activity — only real work does.
+if [ -f "$DIR/audit.log" ]; then
+    LAST=$(grep -v -E '	(start|shutdown_requested|listener_exit|socket_reconnect)	' \
+        "$DIR/audit.log" 2>/dev/null | tail -1 | cut -f1)
+    if [ -n "$LAST" ]; then
+        LAST_EPOCH=$(date -d "$LAST" +%s 2>/dev/null || echo 0)
+        if [ "$LAST_EPOCH" -gt 0 ] && \
+           [ $(( $(date +%s) - LAST_EPOCH )) -lt "$QUIET_FOR" ]; then
+            exit 0
+        fi
+    fi
+fi
+
+L=$(cat "$HY_RUN_DIR/listener.pid" 2>/dev/null)
+[ -n "$L" ] && kill "$L" 2>/dev/null
+# The listener drains gracefully — it finishes the message in flight before
+# exiting, exactly as the auto-updater allows for. Give it that time instead
+# of SIGKILLing a paid-for model call three seconds in.
+for _ in $(seq 1 25); do
+    [ -n "$L" ] && [ -d "/proc/$L" ] || break
+    sleep 1
+done
+[ -n "$L" ] && kill -9 "$L" 2>/dev/null
+
+[ -n "$D" ] && kill "$D" 2>/dev/null
+sleep 3
+[ -n "$D" ] && kill -9 "$D" 2>/dev/null
+
+"$HOME/.local/bin/signal-supervise" >/dev/null 2>&1 9>&-
+sleep 20
+
+ND=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+if [ -z "$ND" ] || ! kill -0 "$ND" 2>/dev/null; then
+    /usr/bin/python3 "$SEND" "❌ signal recycle failed — daemon not back after 20s; watchdog may recover it" >/dev/null 2>&1
+    exit 1
+fi
+exit 0

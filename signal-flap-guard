@@ -1,0 +1,104 @@
+#!/bin/bash
+# signal-flap-guard — functional health check for the signal-cli daemon.
+#
+# Three failure signatures observed on 2026-08-23/24, none visible to
+# process-liveness checks:
+#
+# 1. LOUD ROT — upstream reconnect storm logging "Connection closed
+#    unexpectedly" (daemon.log) — counted in NEW bytes only.
+# 2. RESET SPIN — java.net.SocketException: Connection reset loops in
+#    cli.log, with the daemon burning >100% CPU while sends intermittently
+#    succeed and inbound dies. Detected two ways: the cli.log pattern, and
+#    lifetime CPU% from ps (a healthy daemon decays toward ~0%; the spin
+#    ran at 138%).
+# 3. SILENT HALF-OPEN — connections look fine, roundtrip works, inbound
+#    dead. signal-probe (getUserStatus) catches the total variant; the CPU
+#    and pattern checks above catch the partial ones the probe misses.
+#
+# Any signature recycles the daemon and records it in actions.log.
+set -u
+
+_hy_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+for _lib in "$_hy_dir/hongyan-lib.sh" "$HOME/programoj/hongyan/hongyan-lib.sh" "$HOME/.local/bin/hongyan-lib.sh"; do
+    [ -f "$_lib" ] && { . "$_lib"; break; }
+done
+: "${HY_RUN_DIR:?hongyan-lib.sh not found}"
+STATE="$HOME/.cache/signal-flap-guard"
+mkdir -p "$STATE"
+exec 9>"$STATE/.lock" && flock -n 9 || exit 0
+
+SEND="$HOME/.local/bin/signal-send.py"
+PROBE="$HOME/.local/bin/signal-probe"
+THRESHOLD=40
+CPU_THRESHOLD=50
+ACTIONS="$STATE/actions.log"
+
+log_action() { echo "$(date '+%F %T') $*" >> "$ACTIONS"; }
+
+recycle() {
+    local reason="$1" D ND verb
+    D=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+    if [ -n "$D" ] && kill -0 "$D" 2>/dev/null; then
+        kill "$D" 2>/dev/null; sleep 3; kill -9 "$D" 2>/dev/null
+        verb="recycled"
+    else
+        # No live daemon. This is the case check 4 exists to catch, so it must
+        # not be a silent no-op: with nothing to kill there is still something
+        # to start, and saying nothing here loses the only report of a dead
+        # daemon that the probe just detected.
+        verb="started"
+    fi
+    # 9>&- : fd 9 is our lock on $STATE/.lock. The daemon outlives this script,
+    # so inheriting the fd would leave it holding the lock forever and every
+    # later run would fail flock -n and exit 0 — the guard would silently
+    # switch itself off after its first recycle.
+    ~/.local/bin/signal-supervise >/dev/null 2>&1 9>&-
+    sleep 5
+    ND=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+    if [ -n "$ND" ] && kill -0 "$ND" 2>/dev/null; then
+        log_action "$verb ($reason) -> pid $ND"
+        /usr/bin/python3 "$SEND" "🩺 signal daemon $verb ($reason) — back up as pid $ND" >/dev/null 2>&1
+    else
+        log_action "$verb FAILED ($reason)"
+        /usr/bin/python3 "$SEND" "❌ signal daemon $verb FAILED ($reason) — watchdog should retry within 10 min" >/dev/null 2>&1
+    fi
+}
+
+# ── check 1+2: log signatures ────────────────────────────────────────────────
+count=0
+for f in "$HY_STATE_DIR/daemon.log" "$HY_STATE_DIR/cli.log"; do
+    [ -f "$f" ] || continue
+    off_f="$STATE/offset-$(basename "$f")"
+    size=$(stat -c%s "$f") || continue
+    # An offset file that exists but is empty reads back as "" here, and bash
+    # arithmetic treats that as 0 — which would rescan the log from byte 0 and
+    # count every reset/close event in its whole history, almost certainly
+    # tripping THRESHOLD and recycling a healthy daemon. Default it explicitly.
+    off=$(cat "$off_f" 2>/dev/null)
+    case "$off" in ''|*[!0-9]*) off=0 ;; esac
+    if [ "$size" -lt "$off" ]; then off=0; fi
+    if [ "$size" -gt "$off" ]; then
+        c=$(tail -c +"$((off + 1))" "$f" | grep -cE "closed unexpectedly|Connection reset")
+        count=$((count + c))
+    fi
+    printf '%s\n' "$size" > "$off_f"
+done
+if [ "$count" -ge "$THRESHOLD" ]; then
+    recycle "log signatures: $count reset/close events in window"
+    exit 0
+fi
+
+# ── check 3: reset spin via CPU (lifetime average; healthy decays to ~0) ────
+D=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+if [ -n "$D" ] && kill -0 "$D" 2>/dev/null; then
+    cpu=$(ps -o %cpu= -p "$D" 2>/dev/null | tr -d " ")
+    if [ -n "$cpu" ] && awk -v c="$cpu" -v t="$CPU_THRESHOLD" 'BEGIN{exit !(c>t)}'; then
+        recycle "reset spin: signal-cli at ${cpu}% lifetime CPU"
+        exit 0
+    fi
+fi
+
+# ── check 4: total death ─────────────────────────────────────────────────────
+if ! "$PROBE"; then
+    recycle "silent half-open: probe roundtrip failed"
+fi
