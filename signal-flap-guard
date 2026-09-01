@@ -27,6 +27,45 @@ STATE="$HOME/.cache/signal-flap-guard"
 mkdir -p "$STATE"
 exec 9>"$STATE/.lock" && flock -n 9 || exit 0
 
+# ── freshness guard: skip checks right after a (re)start ─────────────────────
+# signal-recycle (every 6 h at :37) restarts the daemon; for ~1-2 min its
+# Signal websocket is still reconnecting, so the next flap-guard probe (at
+# :38) times out and falsely recycles a healthy daemon — the "🩺 signal
+# daemon recycled" flood. If the daemon started less than FRESH_WINDOW s ago,
+# consume log bytes and skip all checks so the startup reconnect burst doesn't
+# resurface as LOUD ROT next run.
+#
+# Age comes from the process itself (/proc/<pid>), not from the pid file's
+# mtime: the file's timestamp is whatever signal-supervise last did to it,
+# which is not necessarily when this daemon started. signal-recycle answers
+# the same question the same way. The pid-file mtime stays as the fallback
+# for when /proc is unavailable.
+FRESH_WINDOW=180
+_now=$(date +%s)
+_dpid=$(cat "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+_start=""
+if [ -n "$_dpid" ] && [ -d "/proc/$_dpid" ]; then
+    _start=$(stat -c %Y "/proc/$_dpid" 2>/dev/null)
+elif [ -f "$HY_RUN_DIR/daemon.pid" ]; then
+    _start=$(stat -c %Y "$HY_RUN_DIR/daemon.pid" 2>/dev/null)
+fi
+case "$_start" in ''|*[!0-9]*) _start="" ;; esac
+if [ -n "$_start" ]; then
+    _age=$(( _now - _start ))
+    [ "$_age" -lt 0 ] && _age=0
+    if [ "$_age" -lt "$FRESH_WINDOW" ]; then
+        # Write via a variable: redirecting straight from stat truncates the
+        # offset file before stat runs, so a stat failure would leave an empty
+        # offset behind — which reads back as 0 and rescans the whole log.
+        for _f in "$HY_STATE_DIR/daemon.log" "$HY_STATE_DIR/cli.log"; do
+            [ -f "$_f" ] || continue
+            _sz=$(stat -c%s "$_f" 2>/dev/null) || continue
+            [ -n "$_sz" ] && printf '%s\n' "$_sz" > "$STATE/offset-$(basename "$_f")"
+        done
+        exit 0
+    fi
+fi
+
 SEND="$HOME/.local/bin/signal-send.py"
 PROBE="$HOME/.local/bin/signal-probe"
 THRESHOLD=40
