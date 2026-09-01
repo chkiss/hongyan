@@ -16,10 +16,32 @@ from pathlib import Path
 
 _CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME")
                        or str(Path.home() / ".config"), "hongyan")
-_RUN = (os.path.join(os.environ["XDG_RUNTIME_DIR"], "hongyan")
-        if os.environ.get("XDG_RUNTIME_DIR")
-        else os.path.join(os.environ.get("XDG_STATE_HOME")
-                          or str(Path.home() / ".local/state"), "hongyan", "run"))
+_STATE = os.path.join(os.environ.get("XDG_STATE_HOME")
+                      or str(Path.home() / ".local/state"), "hongyan")
+
+
+def _run_dir():
+    """The runtime dir, resolved exactly as hongyan-lib.sh resolves it.
+
+    cron has no session, so XDG_RUNTIME_DIR is unset there while an
+    interactive shell has it. Falling straight through to the state dir is
+    what makes this probe a liar: from cron it looked for the socket under
+    ~/.local/state/hongyan/run while the daemon was listening on
+    /run/user/<uid>/hongyan, so connect() failed instantly, the probe
+    reported a dead daemon, and flap-guard recycled a healthy one every five
+    minutes. The shell lib carries the same scar from the watchdog. The
+    /run/user fallback belongs in both.
+    """
+    rt = os.environ.get("XDG_RUNTIME_DIR")
+    if rt:
+        return os.path.join(rt, "hongyan")
+    user_run = "/run/user/%d" % os.getuid()
+    if os.path.isdir(user_run):
+        return os.path.join(user_run, "hongyan")
+    return os.path.join(_STATE, "run")
+
+
+_RUN = _run_dir()
 
 CFG = json.loads(Path(_CONFIG).joinpath("config.json").read_text())
 # The socket is derived, not configured — see the XDG note in the listener.
