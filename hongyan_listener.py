@@ -32,6 +32,11 @@ import os
 import platform
 import queue as queuelib
 import re
+import sys as _sys
+import os as _os
+
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from vendor import modelchain as _modelchain  # noqa: E402
 import shlex
 import signal
 import socket
@@ -2398,16 +2403,7 @@ def _load_model_state():
 
 def _bench_reason(why):
     """The raw why is often a JSON error dump; reduce it to the essence."""
-    w = why or ""
-    if "503" in w:
-        return "provider outage (503)"
-    if "429" in w or "FreeUsageLimit" in w or "Rate limit" in w:
-        return "free-tier rate limit (429)"
-    if "empty content" in w:
-        return "returned empty content"
-    if "404" in w or "not supported" in w:
-        return "model withdrawn (404)"
-    return clip(w, 50)
+    return _modelchain.bench_reason(why)
 
 
 def bench_report():
@@ -2576,28 +2572,16 @@ def model_call(role, messages, max_tokens=None, effort=None):
 # puts a channel back after the human has looked.
 # --------------------------------------------------------------------------
 
-_TEMPORARY_FAILURE_RE = re.compile(
-    r"timed? ?out|overload|temporar|bad gateway|\b50[234]\b|too many requests|"
-    r"rate.?limit|connection (reset|refused|error)|proxy", re.I)
+# Failure classification lives in the vendored `modelchain` policy, shared with
+# wayfare so the two do not drift. The names below are kept as thin wrappers so
+# every call site in this file reads as it always did.
+#
+# Vendored, not installed: `vendor/` is a git subtree, so this repo still
+# clones and runs with nothing to fetch. Update it with
+#   git subtree pull --prefix=vendor <modelchain-repo> main --squash
 
-# Cap walls self-heal when the free tier's window rolls over — benching them
-# "until a human looks" would leave vision dead all day for no reason. CamelCase
-# matters: the provider emits FreeUsageLimitError, not three plain words.
-_CAP_WALL_RE = re.compile(
-    r"freeusage|free usage exceeded|usage.?limit|requires available credits|"
-    r"add credits|insufficient|quota|payment", re.I)
-
-# A retry hint in the error is the provider telling us exactly how long to
-# stay away; honour it instead of guessing.
-_CAP_RETRY_RE = re.compile(
-    r"retrying in\s*(\d+)\s*h(?:ours?)?(?:\s*(\d+)\s*m(?!s))?", re.I)
-
-_REVIEW_FAILURE_RE = re.compile(
-    r"404|not found|no such model|does not exist|deprecat|decommission|"
-    r"unauthorized|forbidden|invalid.{0,20}key", re.I)
-
-TEMP_COOLDOWN_SECONDS = 120
-CAP_DEFAULT_SECONDS = 86400
+TEMP_COOLDOWN_SECONDS = _modelchain.TEMP_COOLDOWN_SECONDS
+CAP_DEFAULT_SECONDS = _modelchain.CAP_DEFAULT_SECONDS
 
 
 def classify_failure(err):
@@ -2607,25 +2591,12 @@ def classify_failure(err):
     not understand would be worse than retrying. 'capped' benches for the
     provider's own retry window (or a day); only 'gone' waits for a human.
     """
-    text = str(err or "")
-    if _REVIEW_FAILURE_RE.search(text):
-        return "gone"
-    if _CAP_WALL_RE.search(text):
-        return "capped"
-    return "temporary"
+    return _modelchain.classify_failure(err)
 
 
 def bench_seconds_for(err, kind):
     """How long to bench: None means until a human clears it."""
-    if kind == "temporary":
-        return TEMP_COOLDOWN_SECONDS
-    if kind != "capped":
-        return None
-    m = _CAP_RETRY_RE.search(str(err or ""))
-    if m:
-        hinted = int(m.group(1)) * 3600 + int(m.group(2) or 0) * 60 + 600
-        return min(hinted, CAP_DEFAULT_SECONDS)
-    return CAP_DEFAULT_SECONDS
+    return _modelchain.bench_seconds_for(err, kind)
 
 
 def _triage_failures(failures):
