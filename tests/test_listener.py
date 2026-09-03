@@ -1244,10 +1244,17 @@ section("timed reminders")
 
 open(m.QUEUE_FILE, "w").close()
 now = time.time()
-future = m.parse_due("remind me at 23:59 to flip the server", now=now)
-check("'at HH:MM' parses to a real ts", isinstance(future, float) and future > now, True)
-past_time = m.parse_due("at 3am water the plants", now=now)
-check("a time already past rolls to tomorrow", past_time > now + 3600, True)
+
+# Anchored to a fixed local clock, not the wall clock. "at 3am" is only in the
+# past for twenty-one hours out of twenty-four, so between midnight and 03:00
+# this pair failed — and since the suite gates auto-update, a real deployment
+# was blocked by the hour it was attempted rather than by anything in the code.
+fixed_now = time.mktime((2026, 1, 15, 10, 0, 0, 0, 0, -1))
+future = m.parse_due("remind me at 23:59 to flip the server", now=fixed_now)
+check("'at HH:MM' parses to a real ts",
+      isinstance(future, float) and future > fixed_now, True)
+past_time = m.parse_due("at 3am water the plants", now=fixed_now)
+check("a time already past rolls to tomorrow", past_time > fixed_now + 3600, True)
 check("'in 2 hours' parses", abs(m.parse_due("in 2 hours check backups", now=now)
                                 - (now + 7200)) < 5, True)
 check("unparsed text yields no due", m.parse_due("buy milk"), None)
