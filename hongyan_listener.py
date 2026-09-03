@@ -2447,6 +2447,18 @@ def _usable(model):
     return rec.get("until") is not None and rec.get("until", 0) <= time.time()
 
 
+class _StatusError(str):
+    """An error string that also remembers its HTTP status.
+
+    Classification prefers the status; see vendor/modelchain.
+    """
+
+    def __new__(cls, status, text):
+        err = super().__new__(cls, text)
+        err.status = status
+        return err
+
+
 def _request_once(model, messages, max_tokens=None, effort=None):
     """One HTTP attempt. Returns (content, error); exactly one is falsy.
 
@@ -2484,12 +2496,14 @@ def _request_once(model, messages, max_tokens=None, effort=None):
     except urllib.error.HTTPError as exc:
         # The status line alone rarely says WHY ("Free usage exceeded" vs a
         # plain 429), and the distinction is exactly what triage classifies
-        # on. Read the body the error is carrying.
+        # on. Read the body the error is carrying — and keep the status, which
+        # is a fact where the body is prose: a request id containing 404 used
+        # to classify a rate-limited channel as withdrawn.
         try:
             detail = exc.read(400).decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
             detail = ""
-        return None, "%s %s" % (exc, clip(detail, 200))
+        return None, _StatusError(exc.code, "%s %s" % (exc, clip(detail, 200)))
     except Exception as exc:  # noqa: BLE001
         return None, str(exc)
     _record_usage(data.get("usage") or {})
@@ -2584,14 +2598,15 @@ TEMP_COOLDOWN_SECONDS = _modelchain.TEMP_COOLDOWN_SECONDS
 CAP_DEFAULT_SECONDS = _modelchain.CAP_DEFAULT_SECONDS
 
 
-def classify_failure(err):
+def classify_failure(err, status=None):
     """'temporary' | 'capped' | 'gone'.
 
     Unknown errors stay temporary: disabling a channel on evidence we do
     not understand would be worse than retrying. 'capped' benches for the
     provider's own retry window (or a day); only 'gone' waits for a human.
+    The HTTP status decides when it is known.
     """
-    return _modelchain.classify_failure(err)
+    return _modelchain.classify_failure(err, status)
 
 
 def bench_seconds_for(err, kind):
@@ -2601,7 +2616,7 @@ def bench_seconds_for(err, kind):
 
 def _triage_failures(failures):
     for model, err in failures:
-        kind = classify_failure(err)
+        kind = classify_failure(err, getattr(err, "status", None))
         if kind == "gone":
             # A model that no longer exists waits for a human decision —
             # benching it "until you look" must not quietly un-disable itself.
