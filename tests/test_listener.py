@@ -1888,6 +1888,78 @@ finally:
     shutil.rmtree(_rangedir, ignore_errors=True)
 
 
+section("a bench lasts as long as the worst failure, not the last one")
+
+# The walk now lives in vendor/modelchain. These pin the parts that were
+# previously implied by where the code sat rather than stated anywhere.
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+open(m.QUEUE_FILE, "w").close()
+
+# A day-long cap must not be cleared by a two-minute blip arriving after it.
+m.bench_model("some-model", "free usage exceeded", seconds=86400)
+m.bench_model("some-model", "gateway overloaded", seconds=120)
+rec = m._load_model_state().get("some-model") or {}
+check("a cap is not shortened by a later timeout",
+      rec.get("until", 0) > time.time() + 3600, True)
+
+# And one waiting for a human is not put back by any automatic failure.
+m.bench_model("dead-model", "404 no such model", seconds=None)
+m.bench_model("dead-model", "gateway overloaded", seconds=120)
+check("a channel waiting for a human stays that way",
+      m._load_model_state().get("dead-model", {}).get("until"), None)
+check("and is not usable", m._usable("dead-model"), False)
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+
+
+section("a rate limit is read from its status, not its prose")
+
+# Provider bodies carry request ids and URLs. One containing 404 used to
+# classify a rate-limited channel as withdrawn and bench it until a human
+# looked — the most expensive mistake available, from the cheapest coincidence.
+err = m._StatusError(429, "HTTP Error 429: rate limited (request req_404abc)")
+check("429 body mentioning 404 is still a cooldown",
+      m.classify_failure(err, err.status), "temporary")
+check("cooldown is short", m.bench_seconds_for(err, "temporary"), 120)
+
+capped = m._StatusError(429, "Free usage exceeded, retry in 15 minutes")
+check("a spent window is capped, not merely slowed",
+      m.classify_failure(capped, capped.status), "capped")
+check("and waits the window the provider named, not a day",
+      m.bench_seconds_for(capped, "capped"), 900 + 600)
+
+gone = m._StatusError(404, "HTTP Error 404: no such model")
+check("a withdrawn model still waits for a human",
+      m.classify_failure(gone, gone.status), "gone")
+
+# A socket error has no status; the message still decides, as it always did.
+check("no status falls back to the message",
+      m.classify_failure("connection reset by peer"), "temporary")
+
+
+section("every channel benched is reported, not silently skipped")
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+for _mdl in m.chain_for("routing"):
+    m.bench_model(_mdl, "benched for this test", seconds=600)
+
+_reasons = []
+_real_block = m.set_block_reason
+m.set_block_reason = lambda why: _reasons.append(why)
+_real_once2 = m._request_once
+m._request_once = lambda *a, **k: ("should not be called", None)
+out = m.model_call("routing", [{"role": "user", "content": "hi"}])
+m._request_once = _real_once2
+m.set_block_reason = _real_block
+
+check("an all-benched chain answers nothing", out, None)
+check("and says why rather than failing silently",
+      bool(_reasons) and "benched" in _reasons[-1], True)
+
+os.path.exists(m.MODEL_STATE_FILE) and os.remove(m.MODEL_STATE_FILE)
+
+
 section("unknown cli flag dies")
 
 listener_py = os.path.join(ROOT, "hongyan_listener.py")

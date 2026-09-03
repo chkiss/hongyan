@@ -2425,26 +2425,42 @@ def bench_report():
     return lines
 
 
-def bench_model(model, why, seconds=BENCH_SECONDS):
-    """Bench a channel. seconds=None means until a human clears it."""
-    state = _load_model_state()
-    state[model] = {
-        "until": (time.time() + seconds) if seconds else None,
-        "why": clip(str(why), 120),
-        "since": time.time(),
-    }
+def _save_model_state(state):
     tmp = MODEL_STATE_FILE + ".tmp"
     with open(tmp, "w") as fh:
         json.dump(state, fh)
     os.replace(tmp, MODEL_STATE_FILE)
+
+
+class _ListenerBench(_modelchain.Bench):
+    """The existing model_state.json, behind the shared bench interface.
+
+    The file format is unchanged, so an in-flight bench survives this change.
+    """
+
+    def _load(self):
+        return _load_model_state()
+
+    def _save(self, state):
+        _save_model_state(state)
+
+
+_BENCH = _ListenerBench()
+
+
+def bench_model(model, why, seconds=BENCH_SECONDS):
+    """Bench a channel. seconds=None means until a human clears it.
+
+    The shared policy refuses to shorten a longer bench, or to overwrite one
+    that is waiting for a human — a day-long cap must not be cleared by a
+    two-minute timeout that happened to come after it.
+    """
+    _BENCH.bench(model, clip(str(why), 120), seconds)
     audit_fail("model_benched", "%s | %s" % (model, clip(str(why), 100)))
 
 
 def _usable(model):
-    rec = _load_model_state().get(model)
-    if not rec:
-        return True
-    return rec.get("until") is not None and rec.get("until", 0) <= time.time()
+    return _BENCH.usable(model)
 
 
 class _StatusError(str):
@@ -2536,27 +2552,26 @@ def model_call(role, messages, max_tokens=None, effort=None):
     every attempt in the walk (a fallback serving a hard question should
     not silently think less hard).
 
-    Answering outranks bookkeeping. Failures are collected as the walk
-    proceeds; only once a reply is in hand (or every channel has failed)
-    does triage classify them and bench what deserves it.
+    The walk itself is the shared policy in vendor/modelchain; what stays
+    here is what to DO about a benched channel, which is this assistant's
+    business and nobody else's.
     """
-    failures = []
-    for model in chain_for(role):
-        if not _usable(model):
-            continue
-        out, err = _request_once(model, messages, max_tokens, effort=effort)
-        if out is not None:
-            if failures:
-                _triage_failures(failures)
-            return out
-        failures.append((model, err or "empty content"))
-    _triage_failures(failures)
-    if failures:
+    result = _modelchain.run(
+        chain_for(role),
+        lambda model: _request_once(model, messages, max_tokens, effort=effort),
+        bench=_BENCH,
+        on_bench=_on_channel_benched,
+    )
+    if result.ok:
+        return result.value
+
+    failed = [(a.model, a.error) for a in result.attempts if not a.ok]
+    if failed:
         audit_fail("chain_exhausted", "%s | %s" % (
-            role, "; ".join("%s: %s" % (m, e) for m, e in failures)[:200]))
+            role, "; ".join("%s: %s" % (m, e) for m, e in failed)[:200]))
         set_block_reason("every %s model failed (%s)" % (
             role, "; ".join("%s: %s" % (m.split("/")[-1], e)
-                            for m, e in failures)[:150]))
+                            for m, e in failed)[:150]))
     else:
         # Nothing was even tried: the whole chain is benched. This path used
         # to return None without a log line or a reason at all.
@@ -2614,36 +2629,29 @@ def bench_seconds_for(err, kind):
     return _modelchain.bench_seconds_for(err, kind)
 
 
-def _triage_failures(failures):
-    for model, err in failures:
-        kind = classify_failure(err, getattr(err, "status", None))
-        if kind == "gone":
-            # A model that no longer exists waits for a human decision —
-            # benching it "until you look" must not quietly un-disable itself.
-            bench_model(model, err, seconds=None)
-            raise_action_item(model, err)
-            # The bench is indefinite, so without this the dead model stays at
-            # the head of its chain until someone edits config.json by hand —
-            # x-preview-f-free sat there for five days. The repair rides along
-            # in the same alert: one event, one message.
-            was = configured_models().get(model) or ""
-            repair, repaired = safe_heal(model, err)
-            note_model_gone(model, err, extra=repair, force=repaired, roles=was)
-            continue
-        seconds = bench_seconds_for(err, kind)
-        state = _load_model_state()
-        rec = state.get(model) or {}
-        already = (not rec.get("until") and rec) or \
-                  (rec.get("until") or 0) > time.time() + seconds
-        if not already:
-            bench_model(model, err, seconds=seconds)
-        if kind == "capped":
-            # Self-healing at the window rollover, but the owner still gets
-            # one action item: degraded quality until then is worth knowing.
-            raise_action_item(
-                model, "%s — auto-recovers by %s"
-                % (clip(err, 90), time.strftime("%H:%M", time.localtime(
-                    time.time() + seconds))))
+def _on_channel_benched(model, kind, err, seconds):
+    """What a benched channel means for the owner. Called once per failure.
+
+    The bench itself has already happened; this decides who hears about it.
+    Temporary blips are silent — transient noise is not news.
+    """
+    if kind == "gone":
+        # A model that no longer exists waits for a human decision, and the
+        # bench is indefinite, so without a repair the dead model stays at the
+        # head of its chain until someone edits config.json by hand —
+        # x-preview-f-free sat there for five days. The repair rides along in
+        # the same alert: one event, one message.
+        raise_action_item(model, err)
+        was = configured_models().get(model) or ""
+        repair, repaired = safe_heal(model, err)
+        note_model_gone(model, err, extra=repair, force=repaired, roles=was)
+    elif kind == "capped":
+        # Self-healing at the window rollover, but the owner still gets one
+        # action item: degraded quality until then is worth knowing.
+        raise_action_item(
+            model, "%s — auto-recovers by %s"
+            % (clip(err, 90), time.strftime("%H:%M", time.localtime(
+                time.time() + (seconds or 0)))))
 
 
 def raise_action_item(model, err):
