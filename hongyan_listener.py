@@ -2609,7 +2609,8 @@ def model_call(role, messages, max_tokens=None, effort=None):
 #
 # Vendored, not installed: `vendor/` is a git subtree, so this repo still
 # clones and runs with nothing to fetch. Update it with
-#   git subtree pull --prefix=vendor <modelchain-repo> main --squash
+#   git subtree pull --prefix=vendor modelchain main --squash
+# where `modelchain` is a remote pointing at github.com/chkiss/modelchain.
 
 TEMP_COOLDOWN_SECONDS = _modelchain.TEMP_COOLDOWN_SECONDS
 CAP_DEFAULT_SECONDS = _modelchain.CAP_DEFAULT_SECONDS
