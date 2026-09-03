@@ -17,6 +17,10 @@ from typing import Callable
 class Bench:
     """Base class: which models are benched, and why."""
 
+    #: An expired record is kept this long so a report can still explain a
+    #: recent bench, then dropped.
+    PRUNE_AFTER_SECONDS = 7 * 24 * 3600
+
     def __init__(self, clock: Callable[[], float] = time.time) -> None:
         self.clock = clock
 
@@ -38,15 +42,43 @@ class Bench:
         return self.clock() >= until
 
     def bench(self, model: str, why, seconds: int | None) -> None:
-        """Bench a model. ``seconds=None`` means until a human clears it."""
+        """Bench a model. ``seconds=None`` means until a human clears it.
+
+        An existing longer bench is never shortened: a model benched for a day
+        because its free window is spent should not come back in two minutes
+        because it also timed out once.
+        """
         state = self._load()
         now = self.clock()
+
+        held = state.get(model)
+        if held is not None:
+            until = held.get("until")
+            if until is None:
+                return  # Waiting for a human already; nothing outranks that.
+            if seconds is not None and until > now + seconds:
+                return
+
+        state = self._prune(state, now)
         state[model] = {
             "until": (now + seconds) if seconds else None,
             "why": str(why)[:120],
             "since": now,
         }
         self._save(state)
+
+    def _prune(self, state: dict, now: float) -> dict:
+        """Drop records whose cooldown lapsed long ago.
+
+        Without this the state file grows for the life of the service, one
+        entry per model that ever hiccupped.
+        """
+        keep = {}
+        for model, record in state.items():
+            until = record.get("until")
+            if until is None or until > now - self.PRUNE_AFTER_SECONDS:
+                keep[model] = record
+        return keep
 
     def restore(self, model: str) -> bool:
         """Put a benched model back into service. True if it was benched."""
