@@ -1973,6 +1973,23 @@ r2 = subprocess.run([sys.executable, listener_py, "--digest"],
                     capture_output=True, text=True)
 check("known flag exits cleanly", r2.returncode, 0)
 
+# In production this file is reached through a symlink in ~/.local/bin, so
+# anything resolved relative to __file__ must survive that. abspath does not
+# resolve a symlink; the vendored package sat next to the real file and the
+# listener would have failed to import it on the next restart, with the test
+# suite passing all the while because it runs from the repo.
+_linkdir = tempfile.mkdtemp(prefix="hongyan-symlink-")
+try:
+    _link = os.path.join(_linkdir, "hongyan_listener.py")
+    os.symlink(listener_py, _link)
+    r3 = subprocess.run([sys.executable, _link, "--digest"],
+                        capture_output=True, text=True)
+    check("runs when invoked through a symlink", r3.returncode, 0)
+    check("no import error from the vendored package",
+          "ModuleNotFoundError" in r3.stderr or "ImportError" in r3.stderr, False)
+finally:
+    shutil.rmtree(_linkdir, ignore_errors=True)
+
 
 # ---------------------------------------------------------------------------
 shutil.rmtree(_TMP, ignore_errors=True)

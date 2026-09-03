@@ -35,7 +35,9 @@ import re
 import sys as _sys
 import os as _os
 
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+# realpath, not abspath: this file is invoked through a symlink in
+# ~/.local/bin, and abspath would leave us looking for vendor/ there.
+_sys.path.insert(0, _os.path.dirname(_os.path.realpath(__file__)))
 from vendor import modelchain as _modelchain  # noqa: E402
 import shlex
 import signal
