@@ -23,6 +23,7 @@ from .classify import (
     bench_reason,
     bench_seconds_for,
     classify_failure,
+    retry_hint_seconds,
 )
 from .discover import free_models
 
@@ -37,6 +38,7 @@ __all__ = [
     "TEMP_COOLDOWN_SECONDS",
     "bench_reason",
     "bench_seconds_for",
+    "retry_hint_seconds",
     "classify_failure",
     "free_models",
     "run",

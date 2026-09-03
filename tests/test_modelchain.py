@@ -5,6 +5,7 @@ import json
 import pytest
 
 from modelchain import (
+    Bench,
     CAP_DEFAULT_SECONDS,
     ChainExhausted,
     JsonFileBench,
@@ -306,3 +307,122 @@ def test_bench_reason_matches_the_substrings_it_documents():
     assert bench_reason("empty content") == "returned empty content"
     assert bench_reason("404 model gone") == "model withdrawn (404)"
     assert bench_reason("weird") == "weird"
+
+
+# --- status-first classification -----------------------------------------
+
+
+def test_a_status_outranks_the_message():
+    """A 404 inside a request id must not bench a working model for ever."""
+    assert classify_failure("429 rate limited (request req_404abc)") == "temporary"
+    assert classify_failure("rate limited, id 404abc", status=429) == "temporary"
+
+
+def test_cap_wording_still_promotes_a_429():
+    """Providers return 429 both for 'slow down' and 'your window is spent'."""
+    assert classify_failure("free usage exceeded", status=429) == "capped"
+    assert classify_failure("slow down", status=429) == "temporary"
+
+
+@pytest.mark.parametrize(
+    "status,expected",
+    [(401, "gone"), (404, "gone"), (402, "capped"), (403, "capped"),
+     (429, "temporary"), (500, "temporary"), (503, "temporary"), (418, "gone")],
+)
+def test_statuses_map_to_kinds(status, expected):
+    assert classify_failure("", status=status) == expected
+
+
+# --- retry hints ---------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,seconds",
+    [
+        ("retrying in 2h 30m", 9000),
+        ("retry in 1 hour", 3600),
+        ("retry in 15 minutes", 900),
+        ("try again in 45s", 45),
+        ("try again in 90 seconds", 90),
+        ("no hint at all", None),
+    ],
+)
+def test_retry_hints_are_read_in_every_unit(text, seconds):
+    from modelchain.classify import retry_hint_seconds
+
+    assert retry_hint_seconds(text) == seconds
+
+
+def test_a_short_window_is_not_benched_for_a_day():
+    """A fifteen-minute cap used to cost a full day of that channel."""
+    assert bench_seconds_for("quota spent, retry in 15 minutes", "capped") == 900 + 600
+
+
+# --- bench precedence and pruning ----------------------------------------
+
+
+def test_a_longer_bench_is_not_shortened_by_a_later_blip():
+    clock = Clock()
+    bench = MemoryBench(clock)
+    bench.bench("a", "quota", CAP_DEFAULT_SECONDS)
+    bench.bench("a", "timeout", TEMP_COOLDOWN_SECONDS)
+
+    clock.advance(TEMP_COOLDOWN_SECONDS + 1)
+    assert not bench.usable("a"), "a day-long bench was overwritten by a 2-minute one"
+
+
+def test_waiting_for_a_human_outranks_everything():
+    clock = Clock()
+    bench = MemoryBench(clock)
+    bench.bench("a", "404 not found", None)
+    bench.bench("a", "timeout", TEMP_COOLDOWN_SECONDS)
+
+    clock.advance(10 * 24 * 3600)
+    assert not bench.usable("a")
+
+
+def test_long_expired_records_are_dropped():
+    clock = Clock()
+    bench = MemoryBench(clock)
+    bench.bench("old", "timeout", TEMP_COOLDOWN_SECONDS)
+
+    # Measured from when the bench expired, not from when it was set.
+    clock.advance(TEMP_COOLDOWN_SECONDS + Bench.PRUNE_AFTER_SECONDS + 1)
+    bench.bench("new", "timeout", TEMP_COOLDOWN_SECONDS)
+    assert "old" not in bench._load()
+    assert "new" in bench._load()
+
+
+class StatusError(str):
+    """An error that remembers its HTTP status, as a caller may supply."""
+
+    def __new__(cls, status, text):
+        error = super().__new__(cls, text)
+        error.status = status
+        return error
+
+
+def test_a_status_on_the_error_reaches_classification():
+    """Without this, a 429 body mentioning 404 benches the model for ever."""
+    seen = []
+    run(
+        ["a"],
+        lambda model: (None, StatusError(429, "rate limited, request req_404abc")),
+        on_bench=lambda model, kind, error, seconds: seen.append(kind),
+    )
+    assert seen == ["temporary"]
+
+
+def test_without_a_status_the_message_is_still_used():
+    seen = []
+    run(
+        ["a"],
+        lambda model: (None, "404 no such model"),
+        on_bench=lambda model, kind, error, seconds: seen.append(kind),
+    )
+    assert seen == ["gone"]
+
+
+def test_the_status_is_recorded_on_the_attempt():
+    result = run(["a"], lambda model: (None, StatusError(503, "down")))
+    assert result.attempts[0].status == 503

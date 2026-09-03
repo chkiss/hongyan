@@ -34,11 +34,41 @@ _CAP_WALL_RE = re.compile(
 )
 
 # A retry hint in the error is the provider telling us exactly how long to stay
-# away. Honour it rather than guessing.
-_CAP_RETRY_RE = re.compile(r"retrying in\s*(\d+)\s*h(?:ours?)?(?:\s*(\d+)\s*m(?!s))?", re.I)
+# away. Honour it rather than guessing. Providers phrase this several ways, and
+# an unparsed hint used to mean a fifteen-minute window became a day-long bench.
+_CAP_RETRY_HOURS_RE = re.compile(
+    r"(?:retry|retrying|try again)\D{0,12}?(\d+)\s*h(?:ours?|rs?)?"
+    r"(?:\D{0,3}(\d+)\s*m(?!s))?",
+    re.I,
+)
+_CAP_RETRY_MINUTES_RE = re.compile(
+    r"(?:retry|retrying|try again)\D{0,12}?(\d+)\s*(?:m(?:in(?:ute)?s?)?)\b", re.I
+)
+_CAP_RETRY_SECONDS_RE = re.compile(
+    r"(?:retry|retrying|try again)\D{0,12}?(\d+)\s*(?:s(?:ec(?:ond)?s?)?)\b", re.I
+)
 
+#: A window that has just rolled over is still being hammered by everyone else
+#: who was waiting for it, so wait a little past the hint.
+RETRY_HINT_MARGIN_SECONDS = 600
+
+#: Status codes are unambiguous where a message is not. Prefer them.
+STATUS_KIND = {
+    401: "gone",       # the key, not the model
+    404: "gone",       # withdrawn
+    402: "capped",     # needs credit
+    403: "capped",     # policy or access, per model; may clear
+    408: "temporary",
+    409: "temporary",
+    425: "temporary",
+    429: "temporary",  # cap wording can still promote this to "capped"
+}
+
+# Word-bounded on purpose. Unbounded "404" matched a request id, a token
+# count, or a URL, and the consequence of a false "gone" is the worst one
+# available: a working model benched until a person notices.
 _REVIEW_FAILURE_RE = re.compile(
-    r"404|not found|no such model|does not exist|deprecat|decommission|"
+    r"\b404\b|not found|no such model|does not exist|deprecat|decommission|"
     r"unauthorized|forbidden|invalid.{0,20}key",
     re.I,
 )
@@ -49,9 +79,25 @@ TEMP_COOLDOWN_SECONDS = 120
 CAP_DEFAULT_SECONDS = 86400
 
 
-def classify_failure(error) -> str:
-    """``"temporary"``, ``"capped"`` or ``"gone"``."""
+def classify_failure(error, status: int | None = None) -> str:
+    """``"temporary"``, ``"capped"`` or ``"gone"``.
+
+    When the HTTP status is known it decides, because a message is guesswork
+    and a status is not: an error body mentioning "not found" or carrying a
+    request id with 404 in it should not bench a working model indefinitely.
+    Cap wording can still promote a 429 to ``capped``, since providers return
+    429 both for "slow down" and for "your free window is spent".
+    """
     text = str(error or "")
+
+    if status is not None:
+        kind = STATUS_KIND.get(status)
+        if kind is None:
+            kind = "temporary" if status >= 500 else "gone" if status >= 400 else "temporary"
+        if kind == "temporary" and _CAP_WALL_RE.search(text):
+            return "capped"
+        return kind
+
     if _REVIEW_FAILURE_RE.search(text):
         return "gone"
     if _CAP_WALL_RE.search(text):
@@ -66,13 +112,28 @@ def bench_seconds_for(error, kind: str) -> int | None:
     if kind != "capped":
         return None
 
-    match = _CAP_RETRY_RE.search(str(error or ""))
-    if match:
-        # Plus ten minutes, because a window that has just rolled over is
-        # still being hammered by everyone else who was waiting for it.
-        hinted = int(match.group(1)) * 3600 + int(match.group(2) or 0) * 60 + 600
-        return min(hinted, CAP_DEFAULT_SECONDS)
+    hinted = retry_hint_seconds(error)
+    if hinted is not None:
+        return min(hinted + RETRY_HINT_MARGIN_SECONDS, CAP_DEFAULT_SECONDS)
     return CAP_DEFAULT_SECONDS
+
+
+def retry_hint_seconds(error) -> int | None:
+    """How long the provider itself asked us to wait, if it said."""
+    text = str(error or "")
+
+    match = _CAP_RETRY_HOURS_RE.search(text)
+    if match:
+        return int(match.group(1)) * 3600 + int(match.group(2) or 0) * 60
+
+    match = _CAP_RETRY_MINUTES_RE.search(text)
+    if match:
+        return int(match.group(1)) * 60
+
+    match = _CAP_RETRY_SECONDS_RE.search(text)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def bench_reason(why) -> str:

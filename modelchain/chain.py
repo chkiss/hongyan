@@ -25,6 +25,9 @@ class Attempt:
 
     model: str
     error: str | None = None
+    #: HTTP status, when the caller attached one to its error. Classification
+    #: prefers it: a status is a fact where a message is a guess.
+    status: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -70,7 +73,9 @@ def run(
 
     ``attempt(model)`` returns ``(value, error)``. A non-None error means that
     model failed; raising is treated the same way, so a caller need not wrap
-    its own exceptions.
+    its own exceptions. If the error object carries a ``status`` attribute it
+    is used to classify the failure, which is more reliable than reading the
+    provider's prose.
 
     ``on_bench(model, kind, error, seconds)`` is called for each benched model
     after the walk, so an application can alert or log. A ``gone`` model — one
@@ -104,7 +109,9 @@ def run(
             _triage(result.attempts, bench, on_bench)
             return result
 
-        result.attempts.append(Attempt(model, str(error)))
+        # An error object may carry its own status (any object with a
+        # `.status` attribute); str() would throw that away.
+        result.attempts.append(Attempt(model, str(error), getattr(error, "status", None)))
 
     _triage(result.attempts, bench, on_bench)
     if raise_on_exhaustion:
@@ -120,7 +127,7 @@ def _triage(
     for item in attempts:
         if item.ok:
             continue
-        kind = classify_failure(item.error)
+        kind = classify_failure(item.error, item.status)
         seconds = bench_seconds_for(item.error, kind)
         bench.bench(item.model, item.error, seconds)
         if on_bench is not None:
