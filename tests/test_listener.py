@@ -233,7 +233,8 @@ check("the link names the provider that failed",
       m.console_link("nous:tencent/hy3:free"),
       "nous — https://portal.nousresearch.com")
 check("a bare id resolves to the default provider",
-      m.console_link("big-pickle"), "zen — https://opencode.ai/zen")
+      m.console_link("some-bare-model"),
+      "nous — https://portal.nousresearch.com")
 # An invented URL is worse than none: a dead link reads as an answer.
 m.PROVIDERS["nolink"] = {"api_base": "https://example.invalid/v1"}
 check("no page configured means no link", m.console_link("nolink:some-model"), "")
@@ -636,14 +637,17 @@ m.CFG["monthly_review"] = _orig_mode if _orig_mode is not None else "local"
 # ------------------------------------------------------------------ chains ---
 section("model chains")
 
-# The shipped config prefers Ox Alpha Free everywhere it can serve, then Big
-# Pickle, then the Hermes tier; vision needs image-capable models.
-check("routing chain order", m.chain_for("routing"),
-      ["x-preview-f-free", "big-pickle", "hy3-free"])
-check("answering shares the text chain", m.chain_for("answering"),
-      ["x-preview-f-free", "big-pickle", "hy3-free"])
+# The shipped config runs the Nous free models biggest-context first; vision
+# needs an image-capable model, and Step 3.7 Flash is the only free one.
+CHAIN = ["meituan/longcat-2.0:free", "upstage/solar-pro4:free",
+         "inclusionai/ling-3.0-flash-fin:free",
+         "inclusionai/ling-3.0-flash-sante:free", "poolside/laguna-s-2.1:free"]
+check("routing chain order", m.chain_for("routing"), CHAIN)
+check("answering shares the text chain", m.chain_for("answering"), CHAIN)
 check("vision chain is image-capable models", m.chain_for("vision"),
-      ["x-preview-f-free", "mimo-v2.5-free"])
+      ["stepfun/step-3.7-flash:free"])
+check("more than two channels, so healing cannot strip the chain to one",
+      len(m.chain_for("routing")) > 2, True)
 
 # A pre-chain config keeps working after an upgrade: answer model first,
 # then the old router, then the old dedicated vision model.
@@ -661,9 +665,9 @@ check("legacy vision chain", legacy["vision"], ["c/vision"])
 m.CFG.clear()
 m.CFG.update(_orig_cfg)
 
-roles = set(m.configured_models()["x-preview-f-free"].split("+"))
+roles = set(m.configured_models()[CHAIN[0]].split("+"))
 check("one id serving several roles is reported so", roles,
-      {"routing", "answering", "vision"})
+      {"routing", "answering"})
 
 
 # ----------------------------------------------------------- classification ---
@@ -744,7 +748,7 @@ events = []
 
 def overload_then_ok(model, messages, max_tokens=None, effort=None):
     events.append(model)
-    if model == "x-preview-f-free":
+    if model == CHAIN[0]:
         return None, "gateway overloaded"
     return "fallback says hi", None
 
@@ -754,8 +758,8 @@ out = m.model_call("routing", [{"role": "user", "content": "hi"}])
 m._request_once = _real_once
 check("the user got their answer", out, "fallback says hi")
 check("chain walked in order", events,
-      ["x-preview-f-free", "big-pickle"])
-rec = m._load_model_state().get("x-preview-f-free") or {}
+      [CHAIN[0], CHAIN[1]])
+rec = m._load_model_state().get(CHAIN[0]) or {}
 check("overload earned only a cooldown",
       rec.get("until") is not None and rec.get("until", 0) > time.time(), True)
 check("no action item for a transient blip",
@@ -775,17 +779,17 @@ m.subprocess.run = lambda *a, **k: alerts.append(a[0][-1]) or type(
 
 
 def capped_then_ok(model, messages, max_tokens=None, effort=None):
-    if model == "x-preview-f-free":
+    if model == CHAIN[0]:
         return None, ('402 {"error":{"message":"Free usage exceeded, '
                       'add credits https://opencode.ai/zen"}}')
-    return "saved by big-pickle", None
+    return "saved by the fallback", None
 
 
 m._request_once = capped_then_ok
 out = m.model_call("routing", [{"role": "user", "content": "hi"}])
 m._request_once = _real_once
-check("fallback still answered", out, "saved by big-pickle")
-rec = m._load_model_state().get("x-preview-f-free") or {}
+check("fallback still answered", out, "saved by the fallback")
+rec = m._load_model_state().get(CHAIN[0]) or {}
 check("cap wall benches about a day, not forever",
       rec.get("until") is not None
       and time.time() < rec["until"] <= time.time() + 86400 + 60, True)
@@ -809,7 +813,7 @@ m.model_catalog = lambda: None
 
 
 def gone_then_ok(model, messages, max_tokens=None, effort=None):
-    if model == "big-pickle":
+    if model == CHAIN[1]:
         return None, "HTTP Error 404: Not Found — no such model"
     return "saved by hy3", None
 
@@ -820,34 +824,34 @@ m._request_once = _real_once
 m.fetch_roster, m.model_catalog = _real_roster, _real_catalog
 check("gone model still answered around", out, "saved by hy3")
 check("gone model benched indefinitely",
-      m._load_model_state().get("big-pickle", {}).get("until"), None)
+      m._load_model_state().get(CHAIN[1], {}).get("until"), None)
 check("alert went out immediately", len(alerts), 1)
-check("alert names the remedy", "use big-pickle" in alerts[0], True)
+check("alert names the remedy", ("use %s" % CHAIN[1]) in alerts[0], True)
 
 # A benched channel is skipped on later calls, so the duplicate-item guard is
 # exercised by raising again directly.
-m.raise_action_item("x-preview-f-free", "still failing later")
+m.raise_action_item(CHAIN[0], "still failing later")
 actions = [i for _, i in m.pending_items()
-           if i.get("kind") == "action" and i.get("model") == "x-preview-f-free"]
+           if i.get("kind") == "action" and i.get("model") == CHAIN[0]]
 check("repeat failure adds no second chore", len(actions), 1)
 
 digest = m.queue_digest()
 check("fresh action item surfaces in the digest at once",
-      ("needs a decision" in digest and "x-preview-f-free" in digest), True)
+      ("needs a decision" in digest and CHAIN[0] in digest), True)
 
 
 # ------------------------------------------------------------------ restore ---
 section("'use' puts a channel back")
 
 m._request_once = lambda mdl, msgs, max_tokens=None, effort=None: (
-    ("OK", None) if mdl == "x-preview-f-free" else (None, "nope"))
-reply = m.t2_use("x-preview-f-free")
+    ("OK", None) if mdl == CHAIN[0] else (None, "nope"))
+reply = m.t2_use(CHAIN[0])
 check("restored after probe succeeded",
-      reply.startswith("restored x-preview-f-free — back in service"), True)
-check("bench cleared", m._usable("x-preview-f-free"), True)
+      reply.startswith("restored %s — back in service" % CHAIN[0]), True)
+check("bench cleared", m._usable(CHAIN[0]), True)
 check("matching action item closed",
       all(i.get("done") for i in m.load_queue()
-          if i.get("kind") == "action" and i.get("model") == "x-preview-f-free"),
+          if i.get("kind") == "action" and i.get("model") == CHAIN[0]),
       True)
 check("unknown model refused", m.t2_use("not-a-model").startswith("refused"), True)
 m._request_once = _real_once
@@ -1746,7 +1750,13 @@ section("replacing a withdrawn model")
 check("stem strips vendor and free suffix", m.model_stem("tencent/hy3:free"), "hy3")
 check("stem of the endpoint id matches", m.model_stem("hy3-free"), "hy3")
 
-_saved = (m.model_catalog, m.fetch_roster)
+_saved = (m.model_catalog, m.fetch_roster, m.DEFAULT_PROVIDER)
+# Pin the default provider for this block. It is a two-provider test — bare
+# ids on the default endpoint, prefixed ids on the other — and it must keep
+# testing that logic whichever provider the shipped config happens to prefer.
+# When the config's default moved to Nous, the two catalogue keys below
+# collapsed into one and the second silently overwrote the first.
+m.DEFAULT_PROVIDER = "zen"
 _CATALOGS = {
     m.DEFAULT_PROVIDER: ["hy3-free", "ling-3.0-flash-fin-free",
                          "muse-spark-1.2-contributor-free", "claude-opus-5"],
@@ -1782,7 +1792,7 @@ check("paid models are never candidates",
 # is never an option — not even to fill an empty chain.
 check("vision never takes an undescribed model",
       any(not c[1]["verified"] for c in m.substitute_candidates("vision")), False)
-m.model_catalog, m.fetch_roster = _saved
+m.model_catalog, m.fetch_roster, m.DEFAULT_PROVIDER = _saved
 
 _chain_before = list(m.CFG.get("text_chain") or [])
 if _chain_before:

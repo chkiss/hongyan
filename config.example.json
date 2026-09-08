@@ -12,18 +12,28 @@
   "burst_window_seconds": 60,
   "cooldown_seconds": 300,
   "cooldown_max_seconds": 1800,
-  "_model_note": "OpenCode Zen (https://opencode.ai/zen) — an OpenAI-compatible gateway the docs open to any agent. The free tier works keyless today; set key_file to a Zen API key (mode 600) to make usage attributable to an account instead of an IP address.",
-  "api_base": "https://opencode.ai/zen/v1",
-  "key_file": "~/.config/hongyan/zen.key",
-  "_chain_note": "Ordered fallbacks; the first channel that answers wins. Text: Ox Alpha Free (strongest, zero-retention provider) -> Big Pickle (stealth preview; free period may train on traffic) -> Hy3 (Hermes tier). Vision needs image-capable models: Ox Alpha again, MiMo V2.5 behind it. A channel failing with gone/credit-wall errors is benched until YOU look at it — you get an alert and a queue action item, the fallback answers meanwhile, and 'use <model>' puts it back. Temporary failures (overload, timeouts) only earn a two-minute cooldown.",
+  "_model_note": "Nous Research (https://portal.nousresearch.com) — an OpenAI-compatible endpoint serving several free models, with a documented public API and no client restriction. Get a key, put it in key_file (mode 600). OpenCode Zen was the original default and is NOT usable here any more: its free tier refuses any request without an x-opencode-session header ('OpenCode's free tier can only be used in OpenCode'), and a Zen API key does not lift that — the restriction is on the free models, not on the absence of a key.",
+  "api_base": "https://inference-api.nousresearch.com/v1",
+  "key_file": "~/.config/hongyan/nous.key",
+  "_providers_note": "A chain entry is 'model' (default_provider) or 'provider:model'; the split is on the first colon, so Nous ids keep theirs ('nous:inclusionai/ling-3.0-flash-fin:free'). Nous REJECTS an untagged request outright, and wants the tags in the request body — sent as a header they are ignored and the refusal reads as the model declining rather than the request being malformed. A 'user=' tag is required specifically. The tags are product attribution and name nobody.",
+  "default_provider": "nous",
+  "providers": {
+    "nous": {
+      "api_base": "https://inference-api.nousresearch.com/v1",
+      "key_file": "~/.config/hongyan/nous.key",
+      "tags": ["client=hongyan", "user=owner"]
+    }
+  },
+  "_chain_note": "Ordered fallbacks; the first channel that answers wins. Verified free on 2026-09-08, all seven honouring a strict JSON-only prompt. Text runs biggest-context first: LongCat 2.0 (1M) -> Solar Pro 4 (524K) -> the two Ling 3.0 Flash variants -> Laguna S. Vision needs an image-capable model: Step 3.7 Flash is the only free one here. A channel failing with gone/credit-wall errors is benched until YOU look at it — you get an alert and a queue action item, the fallback answers meanwhile, and 'use <model>' puts it back. Temporary failures (overload, timeouts) only earn a two-minute cooldown. Keep more than two entries: a chain that heals down to one has no fallback left, and one misbehaving model becomes every reply.",
   "text_chain": [
-    "x-preview-f-free",
-    "big-pickle",
-    "hy3-free"
+    "meituan/longcat-2.0:free",
+    "upstage/solar-pro4:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+    "inclusionai/ling-3.0-flash-sante:free",
+    "poolside/laguna-s-2.1:free"
   ],
   "vision_chain": [
-    "x-preview-f-free",
-    "mimo-v2.5-free"
+    "stepfun/step-3.7-flash:free"
   ],
   "attachment_dir": "~/.local/share/signal-cli/attachments",
   "max_image_bytes": 8000000,

@@ -2,8 +2,8 @@
 """
 Monthly review driver for the REVIEW HOST of a two-device hongyan install.
 
-Runs the review through the same model chain as the server (Ox Alpha Free,
-then Big Pickle, then the Hermes tier, via OpenCode Zen) — but pull-only:
+Runs the review through the same model chain as the server — read from the
+server's own config, never hardcoded here — but pull-only:
 nothing happens until the owner's first message of the month has reached
 the server. No cron send can ever precede a human conversation.
 
@@ -26,8 +26,44 @@ import urllib.request
 STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME")
                          or os.path.expanduser("~/.local/state"), "hongyan")
 os.makedirs(STATE_DIR, exist_ok=True)
-ZEN_BASE = "https://opencode.ai/zen/v1"
-CHAIN = ["x-preview-f-free", "big-pickle", "hy3-free"]
+# The endpoint and the chain are the SERVER's, read from its config — not a
+# second copy here. The copy drifted exactly as you would expect: it still
+# named x-preview-f-free (withdrawn) and hy3-free, and pointed every call at
+# Zen, whose free tier now refuses anything without an x-opencode-session
+# header. The review that exists to catch the assistant misbehaving was itself
+# calling three dead channels.
+_SERVER = {}
+
+
+def server_models():
+    """(api_base, chain, key, tags) for the server's text chain. Cached."""
+    if not _SERVER:
+        cfg = json.loads(ssh("cat ~/.config/hongyan/config.json"))
+        chain = [m for m in (cfg.get("text_chain") or []) if m]
+        provider = ""
+        if chain and ":" in chain[0]:
+            head = chain[0].split(":", 1)[0]
+            if head in (cfg.get("providers") or {}):
+                provider = head
+        conf = (cfg.get("providers") or {}).get(provider, {})
+        key = ""
+        if conf.get("key_file"):
+            key = ssh("cat %s" % conf["key_file"]).strip()
+        _SERVER.update(
+            base=conf.get("api_base") or cfg.get("api_base", ""),
+            # Chain entries are "provider:model"; the endpoint is already that
+            # provider's, so the prefix comes off before the id is sent.
+            chain=[m.split(":", 1)[1] if provider and m.startswith(provider + ":")
+                   else m for m in chain],
+            key=key, tags=list(conf.get("tags") or []))
+    return _SERVER
+
+
+def _api_headers():
+    h = {"Accept": "application/json", "User-Agent": "hongyan-reviewer/1.0"}
+    if server_models()["key"]:
+        h["Authorization"] = "Bearer " + server_models()["key"]
+    return h
 APPROVABLE_KEYS = {"text_chain", "vision_chain"}
 
 
@@ -111,9 +147,8 @@ def save_pending(state):
 # ----------------------------------------------------------------- gather ---
 
 def fetch_catalogue():
-    req = urllib.request.Request(ZEN_BASE + "/models",
-                                 headers={"Accept": "application/json",
-                                          "User-Agent": "hongyan-reviewer/1.0"})
+    req = urllib.request.Request(server_models()["base"] + "/models",
+                                 headers=_api_headers())
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = json.load(resp)
     out = {}
@@ -155,15 +190,17 @@ def gather():
 
 def chain_call(messages):
     """Walk the chain; same order as prod. Returns (text, model_used)."""
+    srv = server_models()
     payload_base = {"messages": messages, "temperature": 0}
+    if srv["tags"]:
+        # Nous rejects an untagged request, and wants the tags in the body.
+        payload_base["tags"] = srv["tags"]
     last_err = ""
-    for model in CHAIN:
+    for model in srv["chain"]:
         body = json.dumps(dict(payload_base, model=model)).encode()
         req = urllib.request.Request(
-            ZEN_BASE + "/chat/completions", data=body,
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "hongyan-reviewer/1.0",
-                     "Accept": "application/json"})
+            srv["base"] + "/chat/completions", data=body,
+            headers=dict(_api_headers(), **{"Content-Type": "application/json"}))
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.load(resp)

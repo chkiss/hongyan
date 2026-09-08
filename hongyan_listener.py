@@ -2420,11 +2420,14 @@ def usage_line():
 # next steps up. Benching is deliberate — without it, every call would pay
 # the dead model's round-trip before falling through, forever.
 #
-# Preference order is not arbitrary. Ox Alpha Free is both the strongest
-# model here and the most private (its provider keeps nothing); Big Pickle
-# is strong but its free period may train on traffic; the Hermes-tier free
-# models are weakest and carry the same caveat — they are the safety net,
-# not the choice.
+# Preference order is not arbitrary: the Nous free chain runs
+# largest-context first, because the thing that actually breaks an answer
+# here is a long page or document not fitting, not a subtle capability gap
+# between models of this class.
+#
+# Keep more than two entries. Healing swaps a benched channel out, and a
+# chain that heals down to one has no fallback left — that is how a single
+# model emitting tool-call markup became every reply for a day.
 # --------------------------------------------------------------------------
 
 def _build_chains():

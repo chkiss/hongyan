@@ -23,16 +23,19 @@ bot:  It's a Lego Technic 42096 Porsche 911 RSR, retired 2021, currently
 
 ## It costs nothing to run
 
-Everything runs through [OpenCode Zen](https://opencode.ai/zen) — an OpenAI-compatible gateway whose docs open it to *any* agent — on an ordered chain of free models. The first channel that answers wins; the rest are fallbacks:
+Everything runs through [Nous Research](https://portal.nousresearch.com) — an OpenAI-compatible endpoint with a documented public API — on an ordered chain of free models. The first channel that answers wins; the rest are fallbacks:
 
 | Tier | Model | Context | Vision | Notes |
 |---|---|---|---|---|
-| Preferred | `x-preview-f-free` — Ox Alpha Free | 1M | yes | Strongest here, and its provider keeps nothing (zero-retention) |
-| Second | `big-pickle` | 200K | no | Stealth preview; its free period may train on traffic |
-| Fallback | `hy3-free` (Hermes tier) | 190K | no | Weakest of the three; same free-period caveat |
-| Vision fallback | `mimo-v2.5-free` | 200K | yes | Only reached if the preferred vision model is out |
+| Preferred | `meituan/longcat-2.0:free` | 1M | no | Largest context of the free set |
+| Second | `upstage/solar-pro4:free` | 524K | no | |
+| Third / fourth | `inclusionai/ling-3.0-flash-{fin,sante}:free` | 262K | no | Two variants of one family; both answer |
+| Fallback | `poolside/laguna-s-2.1:free` | 262K | no | |
+| Vision | `stepfun/step-3.7-flash:free` | 262K | yes | The only free image-capable model here |
 
-Routing and answering share the text chain — with everything free there is no cost reason to route on a weaker model. The keyless free tier works today; a Zen API key (`key_file`) makes your usage attributable to an account instead of an IP address.
+Routing and answering share the text chain — with everything free there is no cost reason to route on a weaker model. A Nous API key goes in `key_file`; Nous rejects an untagged request, so the `tags` in the provider config are required rather than decorative.
+
+**On OpenCode Zen**, which this used to run on: its free tier now refuses any request that does not carry an `x-opencode-session` header, with the message *"OpenCode's free tier can only be used in OpenCode"*. That is a client restriction, and **a Zen API key does not lift it** — it applies to the free models, not to unauthenticated requests. Only Zen's paid models are unambiguously open to a third-party client. Zen came out of the chain entirely on 2026-09-08 rather than sit there benched. Separately, `x-preview-f-free` (Ox Alpha Free) was withdrawn: 401 "not supported", with or without the header.
 
 Bring your own account and terms. hongyan is a client, not a service: it never proxies anyone else's access. Zen's own terms permit use "for your own internal use" and with any agent, which is exactly what this is — one person's assistant making a handful of calls per message they sent. Free models carry rolling usage caps that reset within about a day; when a cap wall or a withdrawn model takes a channel down, hongyan treats it as a decision for you, not as noise:
 

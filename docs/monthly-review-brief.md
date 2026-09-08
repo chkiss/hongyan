@@ -13,10 +13,13 @@ Only after the owner has messaged the server this month. Check the newest `YYYY-
 Fetch the live catalogue:
 
 ```sh
-curl -s --max-time 15 "https://opencode.ai/zen/v1/models" -H "Accept: application/json"
+curl -s --max-time 15 "https://inference-api.nousresearch.com/v1/models" \
+  -H "Accept: application/json" -H "Authorization: Bearer $(cat ~/.config/hongyan/nous.key)"
 ```
 
-Compare against what the server actually runs: `text_chain` and `vision_chain` in `~/.config/hongyan/config.json`. Free identifiers end in `-free`; the stealth previews are `x-preview-f-free` (Ox Alpha) and `big-pickle`. Pricing lives at https://opencode.ai/zen.
+Compare against what the server actually runs: `text_chain` and `vision_chain` in `~/.config/hongyan/config.json`. Free identifiers end in `:free`. Pricing and the model list live at https://portal.nousresearch.com.
+
+OpenCode Zen is no longer a source here: its free tier refuses any request without an `x-opencode-session` header, and a Zen API key does not lift that. Do not propose moving a channel back to Zen unless the owner has said the restriction is gone.
 
 For each configured model check: presence in the catalogue, cost (Free vs paid), context length, and image-input capability — every `vision_chain` entry must accept images or photo questions break. Judge suitability, not just availability: a model tuned for agentic coding is not the one you want answering grammar questions. Propose wiring changes **only where a real gap exists**; if none, say so in one line.
 
