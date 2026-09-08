@@ -419,6 +419,63 @@ def parse_json_object(text):
     return None
 
 
+_TOOL_CALL_RE = re.compile(r"<tool_call>\s*([A-Za-z0-9_.:-]+)(.*?)</tool_call>",
+                           re.S)
+_TOOL_ARG_RE = re.compile(r"<arg_key>\s*(.*?)\s*</arg_key>\s*"
+                          r"<arg_value>\s*(.*?)\s*</arg_value>", re.S)
+
+# A tool name the model invented maps onto one of OUR actions, or nothing.
+_TOOL_NAME_MAP = {
+    "search": "search", "web_search": "search", "websearch": "search",
+    "google": "search", "browser_search": "search",
+    "open": "open", "open_url": "open", "fetch": "open", "fetch_url": "open",
+    "read_page": "open", "browse": "open", "visit": "open",
+    "probe": "probe", "server": "probe", "server_probe": "probe",
+    "weather": "weather", "get_weather": "weather",
+    "answer": "answer", "final_answer": "answer", "respond": "answer",
+    "task": "task",
+}
+# Which argument key carries the payload, per action, most specific first.
+_TOOL_ARG_KEYS = {
+    "search": ("query", "q", "search_query", "text", "input"),
+    "open": ("target", "url", "link", "page", "host", "hostname", "input"),
+    "probe": ("name", "probe", "check", "input"),
+    "weather": ("place", "location", "city", "input"),
+}
+
+
+def parse_tool_call(text):
+    """Hermes-style <tool_call> markup as one of our action dicts, or None.
+
+    A free-tier model that has been fine-tuned on tool-call syntax ignores
+    "reply with ONLY one JSON object" and emits <tool_call> XML instead. Every
+    routing turn then failed 'no_json', the retries burned out, and the raw
+    markup was shipped to Signal as the answer. The intent in that markup is
+    perfectly legible, so read it rather than throwing the turn away.
+    """
+    if not text or "<tool_call>" not in text:
+        return None
+    m = _TOOL_CALL_RE.search(text)
+    if not m:
+        return None
+    action = _TOOL_NAME_MAP.get(m.group(1).strip().lower())
+    if not action:
+        return None
+    args = {k.lower(): v for k, v in _TOOL_ARG_RE.findall(m.group(2))}
+    if action in ("answer", "task"):
+        return {"action": action}
+    for key in _TOOL_ARG_KEYS[action]:
+        if args.get(key, "").strip():
+            payload = args[key].strip()
+            break
+    else:
+        # A call with no argument we recognise is not a usable instruction.
+        return None
+    field = {"search": "query", "open": "target",
+             "probe": "name", "weather": "place"}[action]
+    return {"action": action, field: payload}
+
+
 def _similar(a, b, threshold=0.8):
     """Token-set overlap, for spotting a step that repeats an earlier one."""
     ta = set(re.findall(r"\w+", a))
@@ -4322,6 +4379,13 @@ def plain_text(text):
     """Strip markdown. Models emit it despite instructions, and Signal shows it raw."""
     if not text:
         return text
+    # Tool-call markup is never something to show a human. A model trained on
+    # it emitted two <tool_call> blocks as its whole final answer, and the raw
+    # XML went out over Signal. Strip it here, at the last point before send,
+    # so no future model can leak it either.
+    text = _TOOL_CALL_RE.sub("", text)
+    text = re.sub(r"</?(?:tool_call|tool_response|arg_key|arg_value|think|"
+                  r"function_call)>", "", text)
     text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)                   # bold
     text = re.sub(r"(?<!\w)[*_](\S.*?\S)[*_](?!\w)", r"\1", text)  # italics
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.M)             # headings
@@ -4392,6 +4456,13 @@ def decide(text, prior, image_desc, steps, challenged, _retry=True,
         return _decide_retry(text, prior, image_desc, steps, challenged,
                              _retry, "empty", "", effort)
     obj = parse_json_object(out)
+    if obj is None:
+        # Before spending a retry: a tool-call-trained model says the same
+        # thing in <tool_call> markup. Read it, and record that we did, so a
+        # channel that never speaks JSON is visible rather than silent.
+        obj = parse_tool_call(out)
+        if obj is not None:
+            audit("decide_tool_call", "%s | %s" % (obj.get("action"), clip(text, 80)))
     if obj is None:
         return _decide_retry(text, prior, image_desc, steps, challenged, _retry,
                              "no_json", out)
@@ -4688,6 +4759,13 @@ def answer(text, notify=None, image_desc="", sources_out=None, forced_turn=None,
         return None
 
     out = plain_text(out)
+    # An answer that was nothing but tool-call markup is now empty, and an
+    # empty reply plus a "— via" line is worse than no reply: the queue path
+    # below turns the question into something a human can pick up.
+    if not out.strip():
+        audit_fail("answer_markup_only", clip(text, 80))
+        set_block_reason("the model replied with tool-call markup instead of an answer")
+        return None
     if sources_out is not None:
         sources_out.extend(sources)
     # A visible source line makes "did you check online?" answerable by looking

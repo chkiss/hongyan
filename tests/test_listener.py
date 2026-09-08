@@ -1999,6 +1999,42 @@ finally:
 
 
 # ---------------------------------------------------------------------------
+section("tool-call markup")
+
+# A free-tier model fine-tuned on tool-call syntax ignored "reply with ONLY one
+# JSON object" and emitted <tool_call> XML. Every routing turn failed 'no_json',
+# the retries burned out, and the raw markup was sent to Signal as the answer to
+# a question about the foramen of Winslow. Read the markup, and never ship it.
+_TC = ("Let me search for more specific information on this.\n"
+       "<tool_call>web_search\n<arg_key>query</arg_key>\n"
+       "<arg_value>probe through foramen of Winslow lesser sac</arg_value>\n"
+       "</tool_call>")
+
+check("tool-call markup reads as a search action",
+      m.parse_tool_call(_TC),
+      {"action": "search", "query": "probe through foramen of Winslow lesser sac"})
+check("a tool name we never defined is dropped",
+      m.parse_tool_call("<tool_call>run_shell\n<arg_key>cmd</arg_key>"
+                        "\n<arg_value>rm -rf /</arg_value>\n</tool_call>"), None)
+check("a probe name still goes through the registry, not the markup",
+      m.parse_tool_call("<tool_call>probe\n<arg_key>name</arg_key>"
+                        "\n<arg_value>disk</arg_value>\n</tool_call>"),
+      {"action": "probe", "name": "disk"})
+check("a call with no usable argument is not an instruction",
+      m.parse_tool_call("<tool_call>search\n</tool_call>"), None)
+check("plain JSON output is left to the JSON parser",
+      m.parse_tool_call('{"action":"search","query":"x"}'), None)
+check("markup never reaches the user, prose around it survives",
+      m.plain_text("The answer is here.\n" + _TC),
+      "The answer is here.\nLet me search for more specific information on this.")
+check("no stray tag survives the strip",
+      "<" in m.plain_text("The answer is here.\n" + _TC), False)
+check("an answer that was only markup comes out empty, not half-stripped",
+      m.plain_text(_TC).replace("Let me search for more specific information on this.",
+                                "").strip(), "")
+
+
+# ---------------------------------------------------------------------------
 shutil.rmtree(_TMP, ignore_errors=True)
 print("\n%s" % ("FAILED: " + ", ".join(FAILURES) if FAILURES else "all tests passed"))
 sys.exit(1 if FAILURES else 0)
