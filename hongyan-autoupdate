@@ -58,7 +58,13 @@ git fetch origin main --quiet || {
 
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse origin/main)"
-[ "$LOCAL" = "$REMOTE" ] && exit 0
+# Ancestry, not equality. Commits pushed straight into this checkout moved HEAD
+# without moving origin/main, so HEAD sat AHEAD of the remote — not equal, so
+# this test fell through; the --ff-only merge onto an ancestor is a no-op that
+# exits 0; the tests passed; and the restart block below then killed the
+# listener every 15 minutes for a day. "origin/main is already in HEAD" is the
+# condition that means there is nothing to do, and it covers equal and behind.
+git merge-base --is-ancestor "$REMOTE" "$LOCAL" && exit 0
 
 log "updating $(git rev-parse --short HEAD) -> $(git rev-parse --short origin/main)"
 
