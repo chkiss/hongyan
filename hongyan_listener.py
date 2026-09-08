@@ -3972,7 +3972,14 @@ def web_search(query, limit=5):
         req = urllib.request.Request(
             "https://html.duckduckgo.com/html/",
             data=data,
-            headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"},
+            # Say what we are. The browser string here was inherited from the
+            # usual scraping recipe, on the assumption an honest UA would be
+            # refused; it is not — tested 2026-09-08, same query, 200 and the
+            # same result count either way. A handful of queries a day from one
+            # person is defensible; pretending to be a browser to make them is
+            # the part that was not.
+            headers={"User-Agent":
+                     "hongyan/2.0 (+personal Signal assistant; one user)"},
         )
         with urllib.request.urlopen(req, timeout=25) as resp:
             page = resp.read().decode("utf-8", "replace")
