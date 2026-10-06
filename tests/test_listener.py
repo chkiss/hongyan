@@ -2030,6 +2030,12 @@ check("a probe name still goes through the registry, not the markup",
       m.parse_tool_call("<tool_call>probe\n<arg_key>name</arg_key>"
                         "\n<arg_value>disk</arg_value>\n</tool_call>"),
       {"action": "probe", "name": "disk"})
+# 2026-10-06: the same model dropped the opening <arg_key>, decide() gave up,
+# and a football-rules question was answered from memory with no search.
+check("markup missing its opening <arg_key> still reads as a search",
+      m.parse_tool_call("<tool_call>search\nquery</arg_key>\n<arg_value>American "
+                        "football snap rules</arg_value>\n</tool_call>"),
+      {"action": "search", "query": "American football snap rules"})
 check("a call with no usable argument is not an instruction",
       m.parse_tool_call("<tool_call>search\n</tool_call>"), None)
 check("plain JSON output is left to the JSON parser",

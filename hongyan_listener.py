@@ -421,7 +421,11 @@ def parse_json_object(text):
 
 _TOOL_CALL_RE = re.compile(r"<tool_call>\s*([A-Za-z0-9_.:-]+)(.*?)</tool_call>",
                            re.S)
-_TOOL_ARG_RE = re.compile(r"<arg_key>\s*(.*?)\s*</arg_key>\s*"
+# The opening <arg_key> is optional: ling-3.0-flash-sante also emits
+# "search\nquery</arg_key>\n<arg_value>…", dropping it, and requiring it threw
+# away a perfectly legible search and answered from memory. Keys are bare
+# identifiers, so without the opener the key still cannot swallow markup.
+_TOOL_ARG_RE = re.compile(r"(?:<arg_key>)?\s*([\w.-]+)\s*</arg_key>\s*"
                           r"<arg_value>\s*(.*?)\s*</arg_value>", re.S)
 
 # A tool name the model invented maps onto one of OUR actions, or nothing.
