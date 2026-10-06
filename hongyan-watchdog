@@ -131,9 +131,22 @@ case "$MODE" in
     # A live-but-wedged process is the failure a PID check misses, so also
     # require a heartbeat that is not ancient. The listener touches it on any
     # socket traffic; 48h is generous because quiet days are normal.
+    #
+    # But a quiet WEEK is normal too, and with no traffic the heartbeat never
+    # moves: from 2026-09-18 this logged "daily FAILED: heartbeat stale" every
+    # morning for a healthy box, then "recovered by restart" because supervise
+    # found both PIDs alive and touched nothing. Staleness alone proves only
+    # silence, so ask the daemon for a real server roundtrip before calling it
+    # a failure.
     if [ -f "$HEARTBEAT" ]; then
         age=$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT") ))
-        [ "$age" -gt 172800 ] && problems+=("heartbeat stale: $((age/3600))h")
+        if [ "$age" -gt 172800 ]; then
+            if "$_hy_dir/signal-probe" >> "$LOG" 2>&1; then
+                log "daily: quiet ${age}s, but the daemon answers a server roundtrip"
+            else
+                problems+=("heartbeat stale: $((age/3600))h and signal-probe failed")
+            fi
+        fi
     fi
 
     # Received images pile up in the attachment store forever otherwise. Read
